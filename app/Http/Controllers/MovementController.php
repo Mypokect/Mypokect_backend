@@ -148,7 +148,7 @@ class MovementController extends Controller
         foreach ($modelos as $modelo) {
             try {
                 $response = Http::withOptions([
-                    'verify' => 'C:\Program Files\php8.3\extras\ssl\cacert.pem',
+                    
                 ])->withHeaders([
                     'Authorization' => "Bearer $apiKey",
                     'Content-Type' => 'application/json',

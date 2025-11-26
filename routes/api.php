@@ -4,6 +4,9 @@ use App\Http\Controllers\Auth\AuthController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\MovementController;
 use App\Http\Controllers\TagController;
+// --- 1. AÑADE EL IMPORT DEL NUEVO CONTROLADOR ---
+use App\Http\Controllers\ScheduledTransactionController;
+use App\Http\Controllers\TransactionController;
 
 Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
@@ -26,5 +29,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/tags/create', [TagController::class, 'store']);
     Route::post('/tags/suggestion', [TagController::class, 'sugerirDesdeIA']);
     Route::get('/tags', [TagController::class, 'index']);
-});
 
+    // --- 2. AÑADE ESTAS DOS LÍNEAS PARA LA FUNCIÓN DEL CALENDARIO ---
+    
+    // `apiResource` crea automáticamente todas las rutas CRUD para las transacciones programadas.
+    // GET    /scheduled-transactions
+    // POST   /scheduled-transactions
+    // GET    /scheduled-transactions/{id}
+    // PUT    /scheduled-transactions/{id}
+    // DELETE /scheduled-transactions/{id}
+    Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
+
+    // Ruta específica para marcar una ocurrencia de un pago como "completado".
+    Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
+    Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
+});
