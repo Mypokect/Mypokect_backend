@@ -19,7 +19,8 @@ Route::get('/error', function () {
 // Rutas de autenticación
 Route::post('/login', [AuthController::class, 'login'])
     ->middleware('throttle:5,1');
-
+Route::post('/register', [AuthController::class, 'register'])
+    ->middleware('throttle:5,1');
 // Rutas // Movimientos
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/movements', [MovementController::class, 'index']);

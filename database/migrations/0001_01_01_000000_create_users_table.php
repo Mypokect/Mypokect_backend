@@ -14,15 +14,21 @@ return new class extends Migration
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
-            $table->string('email')->unique();
-            $table->timestamp('email_verified_at')->nullable();
-            $table->string('password');
+            
+            // --- CAMBIO AQUÍ: Usamos phone en vez de email ---
+            $table->string('phone')->unique(); 
+            
+            // Opcional: cambiamos email_verified_at por phone_verified_at
+            $table->timestamp('phone_verified_at')->nullable();
+            
+            $table->string('password'); // Aquí se guardará el hash del PIN
             $table->rememberToken();
             $table->timestamps();
         });
 
         Schema::create('password_reset_tokens', function (Blueprint $table) {
-            $table->string('email')->primary();
+            // --- CAMBIO AQUÍ TAMBIÉN ---
+            $table->string('phone')->primary(); 
             $table->string('token');
             $table->timestamp('created_at')->nullable();
         });
