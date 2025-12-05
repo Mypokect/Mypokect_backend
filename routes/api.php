@@ -44,4 +44,5 @@ Route::middleware('auth:sanctum')->group(function () {
     // Ruta específica para marcar una ocurrencia de un pago como "completado".
     Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
     Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
+    Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
 });

@@ -7,18 +7,17 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Hash; // Importamos Hash para usarlo más limpio
 
 class AuthController extends Controller
 {
     /**
      * Handle user login
-     * @param \Illuminate\Http\Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function login(Request $request) : JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'phone' => 'required|string|max:15',
+            'phone' => 'required|string|max:20', // Aumenté a 20 por si el prefijo es largo
             'password' => 'required|digits:4',
         ]);
 
@@ -40,7 +39,7 @@ class AuthController extends Controller
                 ], 404);
             }
 
-            if (!password_verify($request->input('password'), $user->password)) {
+            if (!Hash::check($request->input('password'), $user->password)) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Contraseña incorrecta',
@@ -65,19 +64,19 @@ class AuthController extends Controller
             ], 500);
         }
     }
+
     /**
      * Handle user registration
-     * @param \Illuminate\Http\Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function register(Request $request) : JsonResponse
     {
         // Validación de datos
         $validated = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
-            // unique:users,phone asegura que no se repita el teléfono
-            'phone' => 'required|string|max:15|unique:users,phone', 
-            // digits:4 asegura que sean exactamente 4 números (ej: 1234)
+            'phone' => 'required|string|max:20|unique:users,phone',
+            // --- 1. VALIDACIÓN NUEVA ---
+            'country_code' => 'required|string|max:5', 
+            // ---------------------------
             'password' => 'required|digits:4', 
         ]);
 
@@ -91,14 +90,15 @@ class AuthController extends Controller
 
         try {
             // Crear el usuario
-            // Nota: Asegúrate de importar Hash al inicio del archivo (use Illuminate\Support\Facades\Hash;)
             $user = User::create([
                 'name' => $request->input('name'),
                 'phone' => $request->input('phone'),
-                'password' => \Illuminate\Support\Facades\Hash::make($request->input('password')),
+                // --- 2. GUARDAR EL DATO NUEVO ---
+                'country_code' => $request->input('country_code'),
+                // --------------------------------
+                'password' => Hash::make($request->input('password')),
             ]);
 
-            // Crear token de acceso inmediato para que no tenga que loguearse de nuevo
             $token = $user->createToken('auth_token')->plainTextToken;
 
             return response()->json([
@@ -108,7 +108,7 @@ class AuthController extends Controller
                     'user' => $user,
                     'token' => $token,
                 ],
-            ], 201); // 201 Created
+            ], 201);
 
         } catch (\Exception $e) {
             return response()->json([
