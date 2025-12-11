@@ -4,90 +4,111 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
 class SavingsController extends Controller
 {
-    /**
-     * Analiza las finanzas del usuario y genera recomendaciones.
-     */
     public function analyze()
     {
-        $user = Auth::user();
+        try {
+            $user = Auth::user();
+            
+            // 1. OBTENER DATOS REALES (Mes Actual)
+            $startOfMonth = Carbon::now()->startOfMonth();
+            $endOfMonth = Carbon::now()->endOfMonth();
 
-        // 1. Definir el periodo de análisis (Ej: Este mes actual)
-        $startOfMonth = Carbon::now()->startOfMonth();
-        $endOfMonth = Carbon::now()->endOfMonth();
+            $incomes = $user->movements()
+                ->where('type', 'income')
+                ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
 
-        // 2. Obtener movimientos reales de la BD
-        $incomes = $user->movements()
-            ->where('type', 'income')
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
-            ->sum('amount');
+            $expenses = $user->movements()
+                ->where('type', 'expense')
+                ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
 
-        $expenses = $user->movements()
-            ->where('type', 'expense')
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
-            ->sum('amount');
+            // 2. CÁLCULO MATEMÁTICO DE CAPACIDAD (La lógica dura)
+            $balance = $incomes - $expenses;
+            $idealSavings = $incomes * 0.20; // Meta ideal del 20%
+            
+            // Si lo que sobra es MENOR al 20%, la meta real es lo que sobra (para no endeudarlo).
+            // Si lo que sobra es MAYOR al 20%, la meta se queda en el 20% (y el resto es libre inversión/gustos).
+            $realSavingsCapacity = ($balance < $idealSavings) ? max(0, $balance) : $idealSavings;
 
-        // 3. Calcular flujo de caja
-        $balance = $incomes - $expenses;
+            // 3. CONSULTAR A LA IA (El toque humano)
+            $aiResponse = $this->consultarCoachIA($incomes, $expenses, $realSavingsCapacity);
+
+            return response()->json([
+                'math_data' => [
+                    'ingresos' => $incomes,
+                    'gastos' => $expenses,
+                    'balance_real' => $balance,
+                    'ahorro_mensual_sugerido' => $realSavingsCapacity,
+                    'ahorro_semanal_sugerido' => $realSavingsCapacity / 4,
+                ],
+                'ai_insight' => $aiResponse
+            ], 200);
+
+        } catch (\Throwable $e) {
+            return response()->json(['error' => 'Error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    private function consultarCoachIA($ingresos, $gastos, $capacidadAhorro)
+    {
+        $apiKey = config('services.groq.key');
         
-        // 4. Lógica del Asistente (Regla 50/30/20 simplificada)
-        $idealSavings = $incomes * 0.20; // Meta ideal: 20%
-        
-        $status = '';
-        $color = ''; // Para el frontend (hex code o nombre)
-        $message = '';
-        $alert = null;
-        $recommendedMonthly = 0;
+        // Contexto financiero
+        $porcentajeGasto = ($ingresos > 0) ? ($gastos / $ingresos) * 100 : 0;
+        $estado = "Indefinido";
+        if($gastos > $ingresos) $estado = "Déficit (Gastando de más)";
+        else if ($porcentajeGasto > 90) $estado = "Ajustado (Poco margen)";
+        else $estado = "Saludable";
 
-        if ($incomes == 0) {
-            $status = 'NEUTRAL';
-            $message = "Aún no has registrado ingresos este mes. Registra tus entradas para que pueda asesorarte.";
-            $color = 'grey';
-        } 
-        elseif ($balance < 0) {
-            // Gasta más de lo que gana
-            $status = 'CRÍTICO';
-            $color = 'red';
-            $recommendedMonthly = 0;
-            $message = "Tus gastos superan tus ingresos. No es momento de ahorrar, sino de recortar gastos.";
-            $alert = "¡Estás gastando un " . number_format((($expenses / $incomes) - 1) * 100, 0) . "% más de tu capacidad!";
-        } 
-        elseif ($balance < ($incomes * 0.10)) {
-            // Sobra menos del 10%
-            $status = 'AJUSTADO';
-            $color = 'orange';
-            $recommendedMonthly = $balance; // Ahorra lo que sobre
-            $message = "Estás llegando a fin de mes muy justo. Intenta ahorrar cualquier excedente pequeño.";
-            $alert = "Estás usando el " . number_format(($expenses / $incomes) * 100, 0) . "% de tus ingresos.";
-        } 
-        else {
-            // Saludable
-            $status = 'SALUDABLE';
-            $color = 'green';
-            // Recomendamos el 20%, pero si sobra menos de eso, recomendamos lo que sobra para no endeudarlo
-            $recommendedMonthly = min($idealSavings, $balance); 
-            $message = "¡Tus finanzas están sanas! Tienes buena capacidad para ahorrar.";
+        $prompt = <<<PROMPT
+        Actúa como un Asesor Financiero Personal experto.
+        Datos del usuario este mes:
+        - Ingresos: $ingresos
+        - Gastos: $gastos
+        - Estado: $estado
+        - Capacidad Matemática de Ahorro: $capacidadAhorro
+
+        Genera un objeto JSON con:
+        1. "titulo": Frase corta de impacto (ej: "Estás gastando mucho", "Buen ritmo de ahorro").
+        2. "mensaje": Explicación de 2 frases. Si está en déficit, alerta el peligro. Si está bien, motiva a invertir.
+        3. "alerta": true si gasta más del 90% de lo que gana, false si no.
+        4. "color": "red" (déficit), "orange" (ajustado), "green" (bien).
+
+        Solo devuelve JSON.
+        PROMPT;
+
+        $modelos = ['llama-3.1-8b-instant', 'gemma2-9b-it'];
+
+        foreach ($modelos as $modelo) {
+            try {
+                $response = Http::withOptions([])->withHeaders([
+                    'Authorization' => "Bearer $apiKey", 'Content-Type' => 'application/json',
+                ])->post('https://api.groq.com/openai/v1/chat/completions', [
+                    'model' => $modelo,
+                    'messages' => [['role' => 'user', 'content' => $prompt]],
+                    'temperature' => 0.4,
+                    'response_format' => ['type' => 'json_object']
+                ]);
+
+                if ($response->successful()) {
+                    return json_decode($response['choices'][0]['message']['content'], true);
+                }
+            } catch (\Exception $e) {}
         }
 
-        return response()->json([
-            'financial_data' => [
-                'total_income' => $incomes,
-                'total_expenses' => $expenses,
-                'current_balance' => $balance,
-            ],
-            'analysis' => [
-                'status' => $status,
-                'status_color' => $color,
-                'message' => $message,
-                'alert' => $alert, // Puede ser null
-            ],
-            'recommendation' => [
-                'monthly_amount' => $recommendedMonthly,
-                'weekly_amount' => $recommendedMonthly / 4,
-            ]
-        ], 200);
+        // Fallback por si falla la IA
+        return [
+            "titulo" => "Análisis Financiero",
+            "mensaje" => "Basado en tus números, esta es tu capacidad real de ahorro.",
+            "alerta" => ($gastos > $ingresos),
+            "color" => ($gastos > $ingresos) ? "red" : "blue"
+        ];
     }
 }

@@ -7,7 +7,8 @@ use App\Http\Controllers\TagController;
 // --- 1. AÑADE EL IMPORT DEL NUEVO CONTROLADOR ---
 use App\Http\Controllers\ScheduledTransactionController;
 use App\Http\Controllers\TransactionController;
-
+use App\Http\Controllers\SavingsController;
+use App\Http\Controllers\TaxController; 
 Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
 });
@@ -45,4 +46,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
     Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
     Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
+    Route::get('/home-data', [AuthController::class, 'homeData']);
+    Route::get('/taxes/data', [TaxController::class, 'getData']);
 });

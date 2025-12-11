@@ -118,4 +118,45 @@ class AuthController extends Controller
             ], 500);
         }
     }
+      public function homeData(Request $request) : JsonResponse
+    {
+        $user = $request->user();
+
+        // 1. Sumar Ingresos y Gastos
+        $incomes = $user->movements()->where('type', 'income')->sum('amount');
+        $expenses = $user->movements()->where('type', 'expense')->sum('amount');
+        
+        $balance = $incomes - $expenses;
+
+        // 2. Lógica para definir el Estado (Semáforo)
+        // Valores por defecto (Caso: Usuario Nuevo / Sin datos)
+        $statusLabel = "Sin actividad";
+        $statusColor = "grey";
+        $iconType = "neutral"; // Ni sube ni baja
+
+        // Si hay movimientos, calculamos la realidad
+        if ($incomes > 0 || $expenses > 0) {
+            if ($balance >= 0) {
+                $statusLabel = "Saldo a favor";
+                $statusColor = "green";
+                $iconType = "up";
+            } else {
+                $statusLabel = "Sobregirado";
+                $statusColor = "red";
+                $iconType = "down";
+            }
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'name' => $user->name,
+                'balance' => $balance,
+                // ESTOS SON LOS DATOS QUE FALTABAN:
+                'status_label' => $statusLabel,
+                'status_color' => $statusColor,
+                'icon_type' => $iconType,
+            ]
+        ], 200);
+    }
 }
