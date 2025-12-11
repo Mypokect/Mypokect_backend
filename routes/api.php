@@ -8,7 +8,9 @@ use App\Http\Controllers\TagController;
 use App\Http\Controllers\ScheduledTransactionController;
 use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\SavingsController;
-use App\Http\Controllers\TaxController; 
+use App\Http\Controllers\TaxController;
+use App\Http\Controllers\Api\ReminderController;
+use App\Http\Controllers\Api\NotificationTokenController; 
 Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
 });
@@ -48,4 +50,30 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
     Route::get('/home-data', [AuthController::class, 'homeData']);
     Route::get('/taxes/data', [TaxController::class, 'getData']);
+    
+    // Calendar & Reminders API
+    // Rutas nuevas versionadas para el frontend Flutter: /api/v1/calendar/reminders
+    Route::prefix('v1/calendar/reminders')->group(function () {
+        Route::get('/', [ReminderController::class, 'index']);
+        Route::post('/', [ReminderController::class, 'store']);
+        Route::get('/{reminder}', [ReminderController::class, 'show']);
+        Route::patch('/{reminder}', [ReminderController::class, 'update']);
+        Route::delete('/{reminder}', [ReminderController::class, 'destroy']);
+        Route::post('/{reminder}/mark-paid', [ReminderController::class, 'markAsPaid']);
+    });
+
+    // Alias legacy (por si algo viejo usa /api/reminders/*)
+    Route::prefix('reminders')->group(function () {
+        Route::get('/', [ReminderController::class, 'index']);
+        Route::post('/', [ReminderController::class, 'store']);
+        Route::get('/{reminder}', [ReminderController::class, 'show']);
+        Route::patch('/{reminder}', [ReminderController::class, 'update']);
+        Route::delete('/{reminder}', [ReminderController::class, 'destroy']);
+        Route::post('/{reminder}/mark-paid', [ReminderController::class, 'markAsPaid']);
+    });
+    
+    // Push Notification Tokens
+    Route::post('/push/register-token', [NotificationTokenController::class, 'register']);
+    Route::delete('/push/unregister-token/{token}', [NotificationTokenController::class, 'unregister']);
+    Route::get('/push/tokens', [NotificationTokenController::class, 'index']);
 });

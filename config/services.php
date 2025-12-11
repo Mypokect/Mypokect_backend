@@ -39,4 +39,8 @@ return [
     'model' => env('GROQ_MODEL', 'llama3-8b-8192'), // Puedes poner un valor por defecto
     ],
 
+    'fcm' => [
+        'server_key' => env('FCM_SERVER_KEY'),
+    ],
+
 ];

@@ -5,6 +5,8 @@ namespace Database\Seeders;
 use App\Models\User;
 // use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
+use Database\Seeders\ReminderSeeder;
+use Illuminate\Support\Facades\Hash;
 
 class DatabaseSeeder extends Seeder
 {
@@ -13,11 +15,18 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // User::factory(10)->create();
+        // Crea un usuario de prueba compatible con el esquema (login por teléfono)
+        $user = User::first();
 
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
-        ]);
+        if (! $user) {
+            $user = User::create([
+                'name' => 'Test User',
+                'country_code' => 'CO',
+                'phone' => '3000000000',
+                'password' => Hash::make('password'),
+            ]);
+        }
+
+        $this->call(ReminderSeeder::class);
     }
 }
