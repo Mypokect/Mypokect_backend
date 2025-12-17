@@ -1,0 +1,465 @@
+<?php
+
+namespace Tests\Feature;
+
+use Tests\TestCase;
+use App\Models\User;
+use App\Models\Budget;
+use App\Models\BudgetCategory;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+class BudgetSystemTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User $user;
+    private string $token;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        
+        // Create user and get token
+        $this->user = User::factory()->create([
+            'email' => 'test@example.com',
+            'password' => bcrypt('password'),
+        ]);
+        
+        $this->token = $this->user->createToken('test-token')->plainTextToken;
+    }
+
+    /**
+     * Test: Create manual budget (MODO 1)
+     */
+    public function test_create_manual_budget(): void
+    {
+        $payload = [
+            'title' => 'Viaje a Machu Picchu',
+            'description' => 'Vacaciones de verano',
+            'total_amount' => 2000,
+            'categories' => [
+                ['name' => 'Vuelos', 'amount' => 800, 'reason' => 'Pasajes aéreos'],
+                ['name' => 'Alojamiento', 'amount' => 600, 'reason' => 'Hotel'],
+                ['name' => 'Comida', 'amount' => 400, 'reason' => 'Restaurantes'],
+                ['name' => 'Actividades', 'amount' => 200, 'reason' => 'Tours'],
+            ]
+        ];
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/manual', $payload);
+
+        $response->assertStatus(201)
+                 ->assertJsonPath('success', true)
+                 ->assertJsonPath('data.mode', 'manual')
+                 ->assertJsonPath('data.status', 'draft')
+                 ->assertJsonPath('data.language', 'es')
+                 ->assertJsonPath('data.plan_type', 'travel')
+                 ->assertJsonPath('is_valid', true);
+        
+        $this->assertDatabaseHas('budgets', [
+            'user_id' => $this->user->id,
+            'title' => 'Viaje a Machu Picchu',
+            'total_amount' => 2000,
+            'mode' => 'manual',
+        ]);
+        
+        $this->assertDatabaseCount('budget_categories', 4);
+
+        $budget = Budget::first();
+        $this->assertNotNull($budget);
+
+        foreach ($payload['categories'] as $index => $categoryData) {
+            $this->assertDatabaseHas('budget_categories', [
+                'budget_id' => $budget->id,
+                'name' => $categoryData['name'],
+                'amount' => $categoryData['amount'],
+                'order' => $index,
+            ]);
+        }
+    }
+
+    /**
+     * Test: Create manual budget with invalid sum
+     */
+    public function test_create_manual_budget_with_invalid_sum(): void
+    {
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/manual', [
+                'title' => 'Test Budget',
+                'total_amount' => 1000,
+                'categories' => [
+                    ['name' => 'Item 1', 'amount' => 400],
+                    ['name' => 'Item 2', 'amount' => 300],
+                    // Sum is 700, but total is 1000 - should fail
+                ]
+            ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonPath('error', 'Invalid budget');
+    }
+
+    /**
+     * Test: Generate AI suggestions (MODO 2 - Step 1)
+     */
+    public function test_generate_ai_budget_suggestions(): void
+    {
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/ai/generate', [
+                'title' => 'Fiesta de cumpleaños',
+                'description' => 'Fiesta de cumpleaños con 50 personas',
+                'total_amount' => 1500,
+            ]);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonStructure([
+            'data' => [
+                'title',
+                'total_amount',
+                'categories' => [
+                    '*' => ['name', 'amount', 'reason']
+                ],
+                'language',
+                'plan_type',
+                'general_advice'
+            ]
+        ]);
+        
+        // Verify categories sum equals total
+        $categories = $response->json('data.categories');
+        $sum = array_sum(array_column($categories, 'amount'));
+        $this->assertEqualsWithDelta($sum, 1500, 0.01);
+    }
+
+    /**
+     * Test: Save AI budget (MODO 2 - Step 2)
+     */
+    public function test_save_ai_budget(): void
+    {
+        $payload = [
+            'title' => 'Fiesta de cumpleaños',
+            'description' => 'Cumpleaños con 50 personas',
+            'total_amount' => 1500,
+            'language' => 'es',
+            'plan_type' => 'party',
+            'categories' => [
+                ['name' => 'Lugar', 'amount' => 400, 'reason' => 'Salón'],
+                ['name' => 'Comida', 'amount' => 700, 'reason' => 'Catering'],
+                ['name' => 'Decoración', 'amount' => 250, 'reason' => 'Flores y globos'],
+                ['name' => 'Entretenimiento', 'amount' => 150, 'reason' => 'DJ'],
+            ]
+        ];
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/ai/save', $payload);
+
+        $response->assertStatus(201)
+                 ->assertJsonPath('data.mode', 'ai')
+                 ->assertJsonPath('data.plan_type', 'party')
+                 ->assertJsonPath('is_valid', true);
+
+        $this->assertDatabaseHas('budgets', [
+            'user_id' => $this->user->id,
+            'title' => $payload['title'],
+            'total_amount' => $payload['total_amount'],
+            'mode' => 'ai',
+        ]);
+        
+        $this->assertDatabaseCount('budget_categories', 4);
+
+        $budget = Budget::first();
+        $this->assertNotNull($budget);
+
+        foreach ($payload['categories'] as $index => $categoryData) {
+            $this->assertDatabaseHas('budget_categories', [
+                'budget_id' => $budget->id,
+                'name' => $categoryData['name'],
+                'amount' => $categoryData['amount'],
+                'order' => $index,
+            ]);
+        }
+    }
+
+    /**
+     * Test: Get all budgets
+     */
+    public function test_get_all_budgets(): void
+    {
+        // Create test budgets
+        Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(3))
+            ->count(5)
+            ->create();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->getJson('/api/budgets');
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonStructure([
+            'data' => [
+                'current_page',
+                'data' => [
+                    '*' => ['id', 'title', 'total_amount', 'mode', 'categories']
+                ]
+            ]
+        ]);
+    }
+
+    /**
+     * Test: Get single budget
+     */
+    public function test_get_single_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(3))
+            ->create();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->getJson("/api/budgets/{$budget->id}");
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonPath('data.id', $budget->id);
+        $response->assertJsonPath('is_valid', true);
+    }
+
+    /**
+     * Test: Unauthorized access to other user's budget
+     */
+    public function test_cannot_access_other_user_budget(): void
+    {
+        $otherUser = User::factory()->create();
+        $budget = Budget::factory()
+            ->for($otherUser)
+            ->create();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->getJson("/api/budgets/{$budget->id}");
+
+        $response->assertStatus(403);
+        $response->assertJsonPath('error', 'Unauthorized');
+    }
+
+    /**
+     * Test: Update budget
+     */
+    public function test_update_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(3))
+            ->create(['total_amount' => 1000]);
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->putJson("/api/budgets/{$budget->id}", [
+                'title' => 'Updated Title',
+                'status' => 'active',
+                'total_amount' => 1500,
+            ]);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonPath('data.title', 'Updated Title');
+        $response->assertJsonPath('data.status', 'active');
+    }
+
+    /**
+     * Test: Delete budget
+     */
+    public function test_delete_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(3))
+            ->create();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->deleteJson("/api/budgets/{$budget->id}");
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+
+        $this->assertDatabaseMissing('budgets', ['id' => $budget->id]);
+        $this->assertDatabaseMissing('budget_categories', ['budget_id' => $budget->id]);
+    }
+
+    /**
+     * Test: Add category to budget
+     */
+    public function test_add_category_to_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->create(['total_amount' => 1000]);
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson("/api/budgets/{$budget->id}/categories", [
+                'name' => 'New Category',
+                'amount' => 300,
+                'reason' => 'Test category',
+            ]);
+
+        $response->assertStatus(201);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonPath('data.name', 'New Category');
+        $response->assertJsonPath('data.amount', 300);
+    }
+
+    /**
+     * Test: Add category exceeding budget
+     */
+    public function test_cannot_add_category_exceeding_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->create(['amount' => 700]))
+            ->create(['total_amount' => 1000]);
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson("/api/budgets/{$budget->id}/categories", [
+                'name' => 'Exceeding Category',
+                'amount' => 400, // 700 + 400 = 1100 > 1000
+            ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonPath('error', 'Amount exceeds budget');
+    }
+
+    /**
+     * Test: Update category
+     */
+    public function test_update_category(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->create(['amount' => 500]))
+            ->create(['total_amount' => 1000]);
+
+        $category = $budget->categories->first();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->putJson("/api/budgets/{$budget->id}/categories/{$category->id}", [
+                'name' => 'Updated Category',
+                'amount' => 600,
+            ]);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('data.name', 'Updated Category');
+        $response->assertJsonPath('data.amount', 600);
+    }
+
+    /**
+     * Test: Delete category
+     */
+    public function test_delete_category(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(2))
+            ->create();
+
+        $category = $budget->categories->first();
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->deleteJson("/api/budgets/{$budget->id}/categories/{$category->id}");
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+
+        $this->assertDatabaseMissing('budget_categories', ['id' => $category->id]);
+    }
+
+    /**
+     * Test: Validate budget
+     */
+    public function test_validate_budget(): void
+    {
+        $budget = Budget::factory()
+            ->for($this->user)
+            ->has(BudgetCategory::factory()->count(3))
+            ->create(['total_amount' => 1000]);
+
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson("/api/budgets/{$budget->id}/validate");
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+        $response->assertJsonStructure([
+            'is_valid',
+            'categories_total',
+            'total_amount',
+            'difference',
+            'message'
+        ]);
+    }
+
+    /**
+     * Test: Language detection - Spanish
+     */
+    public function test_language_detection_spanish(): void
+    {
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/manual', [
+                'title' => 'Viaje a Perú',
+                'description': 'Vacaciones de verano',
+                'total_amount' => 2000,
+                'categories' => [
+                    ['name' => 'Transporte', 'amount' => 1000],
+                    ['name' => 'Hospedaje', 'amount' => 1000],
+                ]
+            ]);
+
+        $response->assertJsonPath('data.language', 'es');
+    }
+
+    /**
+     * Test: Language detection - English
+     */
+    public function test_language_detection_english(): void
+    {
+        $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+            ->postJson('/api/budgets/manual', [
+                'title' => 'Travel to Peru',
+                'description' => 'Summer vacation',
+                'total_amount' => 2000,
+                'categories' => [
+                    ['name' => 'Transportation', 'amount' => 1000],
+                    ['name' => 'Accommodation', 'amount' => 1000],
+                ]
+            ]);
+
+        $response->assertJsonPath('data.language', 'en');
+    }
+
+    /**
+     * Test: Plan type detection
+     */
+    public function test_plan_type_detection(): void
+    {
+        $testCases = [
+            'Viaje a playa' => 'travel',
+            'Evento corporativo' => 'event',
+            'Fiesta de cumpleaños' => 'party',
+            'Compra de laptop' => 'purchase',
+            'Reforma del baño' => 'project',
+        ];
+
+        foreach ($testCases as $description => $expectedType) {
+            $response = $this->withHeader('Authorization', "Bearer {$this->token}")
+                ->postJson('/api/budgets/manual', [
+                    'title' => 'Test',
+                    'description' => $description,
+                    'total_amount' => 1000,
+                    'categories' => [
+                        ['name' => 'Cat1', 'amount' => 1000],
+                    ]
+                ]);
+
+            $response->assertJsonPath('data.plan_type', $expectedType,
+                "Failed for description: $description");
+        }
+    }
+}

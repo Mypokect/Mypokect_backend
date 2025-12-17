@@ -8,7 +8,8 @@ use App\Http\Controllers\TagController;
 use App\Http\Controllers\ScheduledTransactionController;
 use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\SavingsController;
-use App\Http\Controllers\TaxController; 
+use App\Http\Controllers\TaxController;
+use App\Http\Controllers\SmartBudgetController; 
 Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
 });
@@ -48,4 +49,40 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
     Route::get('/home-data', [AuthController::class, 'homeData']);
     Route::get('/taxes/data', [TaxController::class, 'getData']);
+    
+    // ===== BUDGET ROUTES (MODO 1: Manual & MODO 2: AI) =====
+    // Get all user budgets
+    Route::get('/budgets', [SmartBudgetController::class, 'getBudgets']);
+    
+    // Get single budget with categories
+    Route::get('/budgets/{budget}', [SmartBudgetController::class, 'getBudget']);
+    
+    // Create manual budget (MODO 1)
+    Route::post('/budgets/manual', [SmartBudgetController::class, 'createManualBudget']);
+    
+    // Generate AI suggestions (MODO 2 - step 1)
+    Route::post('/budgets/ai/generate', [SmartBudgetController::class, 'generateAIBudget'])
+        ->middleware('throttle:10,1');
+    
+    // Save AI-generated budget (MODO 2 - step 2)
+    Route::post('/budgets/ai/save', [SmartBudgetController::class, 'saveAIBudget']);
+    
+    // Update budget
+    Route::put('/budgets/{budget}', [SmartBudgetController::class, 'updateBudget']);
+    
+    // Delete budget
+    Route::delete('/budgets/{budget}', [SmartBudgetController::class, 'deleteBudget']);
+    
+    // Validate budget (check if categories sum equals total)
+    Route::post('/budgets/{budget}/validate', [SmartBudgetController::class, 'validateBudget']);
+    
+    // ===== CATEGORY MANAGEMENT =====
+    // Add category to budget
+    Route::post('/budgets/{budget}/categories', [SmartBudgetController::class, 'addCategory']);
+    
+    // Update category
+    Route::put('/budgets/{budget}/categories/{category}', [SmartBudgetController::class, 'updateCategory']);
+    Route::post('/process-voice', [SmartBudgetController::class, 'processVoiceCommand']);
+    // Delete category
+    Route::delete('/budgets/{budget}/categories/{category}', [SmartBudgetController::class, 'deleteCategory']);
 });
