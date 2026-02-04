@@ -2,29 +2,30 @@
 
 namespace Tests\Feature;
 
-use Tests\TestCase;
-use App\Models\User;
 use App\Models\Budget;
 use App\Models\BudgetCategory;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
 
 class BudgetSystemTest extends TestCase
 {
     use RefreshDatabase;
 
     private User $user;
+
     private string $token;
 
     protected function setUp(): void
     {
         parent::setUp();
-        
+
         // Create user and get token
         $this->user = User::factory()->create([
-            'email' => 'test@example.com',
+            'phone' => '+573001234567',
             'password' => bcrypt('password'),
         ]);
-        
+
         $this->token = $this->user->createToken('test-token')->plainTextToken;
     }
 
@@ -42,27 +43,27 @@ class BudgetSystemTest extends TestCase
                 ['name' => 'Alojamiento', 'amount' => 600, 'reason' => 'Hotel'],
                 ['name' => 'Comida', 'amount' => 400, 'reason' => 'Restaurantes'],
                 ['name' => 'Actividades', 'amount' => 200, 'reason' => 'Tours'],
-            ]
+            ],
         ];
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
             ->postJson('/api/budgets/manual', $payload);
 
         $response->assertStatus(201)
-                 ->assertJsonPath('success', true)
-                 ->assertJsonPath('data.mode', 'manual')
-                 ->assertJsonPath('data.status', 'draft')
-                 ->assertJsonPath('data.language', 'es')
-                 ->assertJsonPath('data.plan_type', 'travel')
-                 ->assertJsonPath('is_valid', true);
-        
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.mode', 'manual')
+            ->assertJsonPath('data.status', 'draft')
+            ->assertJsonPath('data.language', 'es')
+            ->assertJsonPath('data.plan_type', 'travel')
+            ->assertJsonPath('is_valid', true);
+
         $this->assertDatabaseHas('budgets', [
             'user_id' => $this->user->id,
             'title' => 'Viaje a Machu Picchu',
             'total_amount' => 2000,
             'mode' => 'manual',
         ]);
-        
+
         $this->assertDatabaseCount('budget_categories', 4);
 
         $budget = Budget::first();
@@ -91,7 +92,7 @@ class BudgetSystemTest extends TestCase
                     ['name' => 'Item 1', 'amount' => 400],
                     ['name' => 'Item 2', 'amount' => 300],
                     // Sum is 700, but total is 1000 - should fail
-                ]
+                ],
             ]);
 
         $response->assertStatus(422);
@@ -117,14 +118,14 @@ class BudgetSystemTest extends TestCase
                 'title',
                 'total_amount',
                 'categories' => [
-                    '*' => ['name', 'amount', 'reason']
+                    '*' => ['name', 'amount', 'reason'],
                 ],
                 'language',
                 'plan_type',
-                'general_advice'
-            ]
+                'general_advice',
+            ],
         ]);
-        
+
         // Verify categories sum equals total
         $categories = $response->json('data.categories');
         $sum = array_sum(array_column($categories, 'amount'));
@@ -147,16 +148,16 @@ class BudgetSystemTest extends TestCase
                 ['name' => 'Comida', 'amount' => 700, 'reason' => 'Catering'],
                 ['name' => 'Decoración', 'amount' => 250, 'reason' => 'Flores y globos'],
                 ['name' => 'Entretenimiento', 'amount' => 150, 'reason' => 'DJ'],
-            ]
+            ],
         ];
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
             ->postJson('/api/budgets/ai/save', $payload);
 
         $response->assertStatus(201)
-                 ->assertJsonPath('data.mode', 'ai')
-                 ->assertJsonPath('data.plan_type', 'party')
-                 ->assertJsonPath('is_valid', true);
+            ->assertJsonPath('data.mode', 'ai')
+            ->assertJsonPath('data.plan_type', 'party')
+            ->assertJsonPath('is_valid', true);
 
         $this->assertDatabaseHas('budgets', [
             'user_id' => $this->user->id,
@@ -164,7 +165,7 @@ class BudgetSystemTest extends TestCase
             'total_amount' => $payload['total_amount'],
             'mode' => 'ai',
         ]);
-        
+
         $this->assertDatabaseCount('budget_categories', 4);
 
         $budget = Budget::first();
@@ -188,7 +189,7 @@ class BudgetSystemTest extends TestCase
         // Create test budgets
         Budget::factory()
             ->for($this->user)
-            ->has(BudgetCategory::factory()->count(3))
+            ->has(BudgetCategory::factory()->count(3), "categories")
             ->count(5)
             ->create();
 
@@ -199,11 +200,8 @@ class BudgetSystemTest extends TestCase
         $response->assertJsonPath('success', true);
         $response->assertJsonStructure([
             'data' => [
-                'current_page',
-                'data' => [
-                    '*' => ['id', 'title', 'total_amount', 'mode', 'categories']
-                ]
-            ]
+                '*' => ['id', 'title', 'total_amount', 'mode', 'categories'],
+            ],
         ]);
     }
 
@@ -214,7 +212,7 @@ class BudgetSystemTest extends TestCase
     {
         $budget = Budget::factory()
             ->for($this->user)
-            ->has(BudgetCategory::factory()->count(3))
+            ->has(BudgetCategory::factory()->count(3), "categories")
             ->create();
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
@@ -250,7 +248,7 @@ class BudgetSystemTest extends TestCase
     {
         $budget = Budget::factory()
             ->for($this->user)
-            ->has(BudgetCategory::factory()->count(3))
+            ->has(BudgetCategory::factory()->count(3), "categories")
             ->create(['total_amount' => 1000]);
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
@@ -273,7 +271,7 @@ class BudgetSystemTest extends TestCase
     {
         $budget = Budget::factory()
             ->for($this->user)
-            ->has(BudgetCategory::factory()->count(3))
+            ->has(BudgetCategory::factory()->count(3), "categories")
             ->create();
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
@@ -305,7 +303,7 @@ class BudgetSystemTest extends TestCase
         $response->assertStatus(201);
         $response->assertJsonPath('success', true);
         $response->assertJsonPath('data.name', 'New Category');
-        $response->assertJsonPath('data.amount', 300);
+        $response->assertJsonPath('data.amount', '300.00');
     }
 
     /**
@@ -348,7 +346,7 @@ class BudgetSystemTest extends TestCase
 
         $response->assertStatus(200);
         $response->assertJsonPath('data.name', 'Updated Category');
-        $response->assertJsonPath('data.amount', 600);
+        $response->assertJsonPath('data.amount', '600.00');
     }
 
     /**
@@ -379,7 +377,7 @@ class BudgetSystemTest extends TestCase
     {
         $budget = Budget::factory()
             ->for($this->user)
-            ->has(BudgetCategory::factory()->count(3))
+            ->has(BudgetCategory::factory()->count(3), "categories")
             ->create(['total_amount' => 1000]);
 
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
@@ -392,7 +390,7 @@ class BudgetSystemTest extends TestCase
             'categories_total',
             'total_amount',
             'difference',
-            'message'
+            'message',
         ]);
     }
 
@@ -404,12 +402,12 @@ class BudgetSystemTest extends TestCase
         $response = $this->withHeader('Authorization', "Bearer {$this->token}")
             ->postJson('/api/budgets/manual', [
                 'title' => 'Viaje a Perú',
-                'description': 'Vacaciones de verano',
+                'description' => 'Vacaciones de verano',
                 'total_amount' => 2000,
                 'categories' => [
                     ['name' => 'Transporte', 'amount' => 1000],
                     ['name' => 'Hospedaje', 'amount' => 1000],
-                ]
+                ],
             ]);
 
         $response->assertJsonPath('data.language', 'es');
@@ -428,7 +426,7 @@ class BudgetSystemTest extends TestCase
                 'categories' => [
                     ['name' => 'Transportation', 'amount' => 1000],
                     ['name' => 'Accommodation', 'amount' => 1000],
-                ]
+                ],
             ]);
 
         $response->assertJsonPath('data.language', 'en');
@@ -455,7 +453,7 @@ class BudgetSystemTest extends TestCase
                     'total_amount' => 1000,
                     'categories' => [
                         ['name' => 'Cat1', 'amount' => 1000],
-                    ]
+                    ],
                 ]);
 
             $response->assertJsonPath('data.plan_type', $expectedType,

@@ -10,7 +10,7 @@ class TransactionOccurrence extends Model
     use HasFactory;
 
     protected $table = 'transaction_occurrences';
-    
+
     protected $fillable = [
         // --- ¡AÑADE 'user_id' A LA LISTA! ---
         'user_id',

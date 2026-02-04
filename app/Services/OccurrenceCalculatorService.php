@@ -6,7 +6,6 @@ use App\Models\ScheduledTransaction;
 use App\Models\TransactionOccurrence;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
 
 class OccurrenceCalculatorService
 {
@@ -34,13 +33,14 @@ class OccurrenceCalculatorService
             ->where(function ($query) use ($startOfMonth) {
                 $query->whereNull('end_date')->orWhere('end_date', '>=', $startOfMonth);
             })->get();
-        
+
         $occurrencesResult = [];
 
         // 3. Calculamos las ocurrencias en PHP, igual que antes.
         foreach ($potentialTransactions as $transaction) {
             // Lógica de cálculo (no cambia) ...
-            if ($transaction->recurrence_type === 'none') { /* ... */ }
+            if ($transaction->recurrence_type === 'none') { /* ... */
+            }
             // ... resto de tu lógica de while ...
 
             // 4. CORRECCIÓN CLAVE: Al momento de crear la ocurrencia, buscamos en nuestro array de pagos.
@@ -52,7 +52,7 @@ class OccurrenceCalculatorService
 
         return $occurrencesResult;
     }
-    
+
     // El método formatOccurrence no cambia.
     private function formatOccurrence(ScheduledTransaction $transaction, string $date, bool $isPaid): array
     {

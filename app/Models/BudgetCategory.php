@@ -2,11 +2,14 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class BudgetCategory extends Model
 {
+    use HasFactory;
+
     protected $fillable = [
         'budget_id',
         'name',
@@ -17,8 +20,8 @@ class BudgetCategory extends Model
     ];
 
     protected $casts = [
-        'amount' => 'float',
-        'percentage' => 'float',
+        'amount' => 'decimal:2',
+        'percentage' => 'decimal:2',
     ];
 
     /**
