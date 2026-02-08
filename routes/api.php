@@ -12,15 +12,13 @@ use App\Http\Controllers\Finance\TransactionController as FinanceTransactionCont
 use App\Http\Controllers\Shared\TagController;
 use App\Http\Controllers\Shared\TransactionController;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\MovementController;
-use App\Http\Controllers\TagController;
-// --- 1. AÑADE EL IMPORT DEL NUEVO CONTROLADOR ---
-use App\Http\Controllers\ScheduledTransactionController;
-use App\Http\Controllers\TransactionController;
-use App\Http\Controllers\SavingsController;
-use App\Http\Controllers\TaxController;
-use App\Http\Controllers\Api\ReminderController;
-use App\Http\Controllers\Api\NotificationTokenController; 
+
+/*
+|--------------------------------------------------------------------------
+| API Routes
+|--------------------------------------------------------------------------
+*/
+
 Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
 });
