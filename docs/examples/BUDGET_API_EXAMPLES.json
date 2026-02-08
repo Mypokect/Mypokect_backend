@@ -1,0 +1,319 @@
+{
+  "info": {
+    "name": "Budget System API - Dual Mode (Manual + AI)",
+    "description": "Complete collection for testing the dual-mode budget system",
+    "version": "1.0.0"
+  },
+  "requests": [
+    {
+      "name": "1. Get all budgets",
+      "method": "GET",
+      "url": "{{BASE_URL}}/api/budgets?status=active",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Accept": "application/json"
+      },
+      "description": "Retrieve all budgets for the authenticated user"
+    },
+    {
+      "name": "2. Get single budget",
+      "method": "GET",
+      "url": "{{BASE_URL}}/api/budgets/1",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Accept": "application/json"
+      },
+      "description": "Get a specific budget with all its categories"
+    },
+    {
+      "name": "3. Create MANUAL budget - Travel (Spanish)",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/manual",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Viaje a Machu Picchu",
+        "description": "Vacaciones de verano 2025 a Perú con la familia",
+        "total_amount": 2000,
+        "categories": [
+          {
+            "name": "Vuelos",
+            "amount": 800,
+            "reason": "Pasajes aéreos ida y vuelta para 2 personas"
+          },
+          {
+            "name": "Alojamiento",
+            "amount": 600,
+            "reason": "3 noches en hotel 4 estrellas en Cusco"
+          },
+          {
+            "name": "Comida",
+            "amount": 400,
+            "reason": "Desayunos y cenas en restaurantes locales"
+          },
+          {
+            "name": "Actividades",
+            "amount": 150,
+            "reason": "Entrada a Machu Picchu y guía local"
+          },
+          {
+            "name": "Transporte local",
+            "amount": 50,
+            "reason": "Taxis, trenes locales"
+          }
+        ]
+      },
+      "description": "Create a manual budget for a trip to Machu Picchu (Spanish language)"
+    },
+    {
+      "name": "4. Create MANUAL budget - Event (English)",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/manual",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Wedding Reception",
+        "description": "Reception for 100 guests, cocktail hour followed by dinner",
+        "total_amount": 5000,
+        "categories": [
+          {
+            "name": "Venue",
+            "amount": 1500,
+            "reason": "Room rental for 4 hours with tables and chairs"
+          },
+          {
+            "name": "Catering",
+            "amount": 2500,
+            "reason": "Dinner for 100 guests with bar service"
+          },
+          {
+            "name": "Decorations",
+            "amount": 600,
+            "reason": "Flowers, lights, centerpieces"
+          },
+          {
+            "name": "Music",
+            "amount": 400,
+            "reason": "DJ and sound system"
+          }
+        ]
+      },
+      "description": "Create a manual budget for a wedding reception (English language)"
+    },
+    {
+      "name": "5. Generate AI suggestions - Party (Spanish)",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/ai/generate",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Fiesta de cumpleaños de María",
+        "description": "Cumpleaños número 30 de mi hermana. Queremos una fiesta con 50 personas en casa, con comida, decoración y entretenimiento. Debe ser memorable pero sin gastar demasiado.",
+        "total_amount": 1500
+      },
+      "description": "Generate AI suggestions for a birthday party. The system will detect Spanish language and 'party' plan type."
+    },
+    {
+      "name": "6. Generate AI suggestions - Project (English)",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/ai/generate",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Home Kitchen Renovation",
+        "description": "Complete renovation of the kitchen including new cabinets, countertops, appliances, and flooring. We want modern style with good quality materials.",
+        "total_amount": 8000
+      },
+      "description": "Generate AI suggestions for a home renovation project. The system will detect English language and 'project' plan type."
+    },
+    {
+      "name": "7. Save AI budget (after editing)",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/ai/save",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Fiesta de cumpleaños de María",
+        "description": "Cumpleaños número 30 de mi hermana",
+        "total_amount": 1500,
+        "language": "es",
+        "plan_type": "party",
+        "categories": [
+          {
+            "name": "Alquiler del lugar",
+            "amount": 400,
+            "reason": "Renta de salón decorado"
+          },
+          {
+            "name": "Catering",
+            "amount": 700,
+            "reason": "Comida para 50 personas"
+          },
+          {
+            "name": "Decoración",
+            "amount": 200,
+            "reason": "Globos, flores y detalles temáticos"
+          },
+          {
+            "name": "Entretenimiento",
+            "amount": 150,
+            "reason": "Música y animador"
+          },
+          {
+            "name": "Imprevistos",
+            "amount": 50,
+            "reason": "Gastos adicionales"
+          }
+        ]
+      },
+      "description": "Save an AI-generated budget after the user has reviewed and potentially edited the categories."
+    },
+    {
+      "name": "8. Update budget",
+      "method": "PUT",
+      "url": "{{BASE_URL}}/api/budgets/1",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Viaje a Machu Picchu - Actualizado",
+        "total_amount": 2500,
+        "status": "active"
+      },
+      "description": "Update a budget. If total_amount changes, percentages are recalculated automatically."
+    },
+    {
+      "name": "9. Delete budget",
+      "method": "DELETE",
+      "url": "{{BASE_URL}}/api/budgets/1",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}"
+      },
+      "description": "Delete a budget and all its categories"
+    },
+    {
+      "name": "10. Validate budget",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/1/validate",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}"
+      },
+      "description": "Check if the sum of all categories equals the total_amount"
+    },
+    {
+      "name": "11. Add category to budget",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/1/categories",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "name": "Seguros de viaje",
+        "amount": 150,
+        "reason": "Cobertura médica y cancelación"
+      },
+      "description": "Add a new category to an existing budget"
+    },
+    {
+      "name": "12. Update category",
+      "method": "PUT",
+      "url": "{{BASE_URL}}/api/budgets/1/categories/1",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "name": "Vuelos (con escalas)",
+        "amount": 750,
+        "reason": "Pasajes con conexión (más económico)"
+      },
+      "description": "Update a category within a budget"
+    },
+    {
+      "name": "13. Delete category",
+      "method": "DELETE",
+      "url": "{{BASE_URL}}/api/budgets/1/categories/1",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}"
+      },
+      "description": "Delete a specific category from a budget"
+    },
+    {
+      "name": "ERROR: Categories sum doesn't match",
+      "method": "POST",
+      "url": "{{BASE_URL}}/api/budgets/manual",
+      "headers": {
+        "Authorization": "Bearer {{TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "title": "Budget Test",
+        "description": "This will fail because sum doesn't equal total",
+        "total_amount": 1000,
+        "categories": [
+          {
+            "name": "Item 1",
+            "amount": 400
+          },
+          {
+            "name": "Item 2",
+            "amount": 300
+          }
+        ]
+      },
+      "description": "Example of validation error when categories sum ($700) doesn't match total_amount ($1000)"
+    }
+  ],
+  "variables": [
+    {
+      "key": "BASE_URL",
+      "value": "http://localhost:8000",
+      "description": "Base URL of your Laravel API"
+    },
+    {
+      "key": "TOKEN",
+      "value": "YOUR_SANCTUM_TOKEN_HERE",
+      "description": "Your Sanctum authentication token"
+    }
+  ],
+  "workflow": {
+    "manual_budget_workflow": [
+      "1. Create MANUAL budget with categories",
+      "2. Get single budget to verify",
+      "3. Add more categories if needed",
+      "4. Update category amounts",
+      "5. Validate budget",
+      "6. Update status to 'active'",
+      "7. Delete categories or budget"
+    ],
+    "ai_budget_workflow": [
+      "1. Generate AI suggestions",
+      "2. Review the categories (in frontend)",
+      "3. Edit categories if needed",
+      "4. Save AI budget",
+      "5. Verify budget is valid",
+      "6. Activate the budget"
+    ]
+  },
+  "notes": {
+    "language_detection": "System automatically detects Spanish vs English from title and description. Spanish keywords: viaje, fiesta, boda, proyecto, compra, evento, vacaciones, cumpleaños",
+    "plan_type_detection": "System automatically classifies plan type: travel, event, party, purchase, project, other",
+    "budget_validation": "Sum of categories MUST equal total_amount (tolerance: 0.01 for decimal rounding)",
+    "percentage_calculation": "Percentages are automatically calculated as (amount / total_amount) * 100",
+    "rate_limiting": "AI generation endpoint (/api/budgets/ai/generate) is rate-limited to 10 requests per minute",
+    "authentication": "All endpoints require Bearer token authentication (Sanctum)",
+    "authorization": "Users can only view/edit their own budgets. Cross-user access returns 403 Unauthorized"
+  }
+}

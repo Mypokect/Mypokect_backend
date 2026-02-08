@@ -1,6 +1,16 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Budget\BudgetController;
+use App\Http\Controllers\Finance\GoalContributionController;
+use App\Http\Controllers\Finance\MovementController;
+use App\Http\Controllers\Finance\SavingGoalController;
+use App\Http\Controllers\Finance\SavingsController;
+use App\Http\Controllers\Finance\ScheduledTransactionController;
+use App\Http\Controllers\Finance\TaxController;
+use App\Http\Controllers\Finance\TransactionController as FinanceTransactionController;
+use App\Http\Controllers\Shared\TagController;
+use App\Http\Controllers\Shared\TransactionController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\MovementController;
 use App\Http\Controllers\TagController;
@@ -15,65 +25,88 @@ Route::get('/', function () {
     return response()->json(['message' => 'Welcome to the Finance API']);
 });
 
+// Ruta de fallback para errores de autenticación
 Route::get('/error', function () {
-    return response()->json(['error' => 'error into the server'], 500);
+    return response()->json(['error' => 'Unauthorized or Server Error'], 401);
 })->name('login');
 
-// Rutas de autenticación
+// --- AUTENTICACIÓN ---
 Route::post('/login', [AuthController::class, 'login'])
-    ->middleware('throttle:5,1');
+    ->middleware('throttle:10,1');
+
 Route::post('/register', [AuthController::class, 'register'])
-    ->middleware('throttle:5,1');
-// Rutas // Movimientos
+    ->middleware('throttle:10,1');
+
+// --- RUTAS PROTEGIDAS (Sanctum) ---
 Route::middleware('auth:sanctum')->group(function () {
-    Route::get('/movements', [MovementController::class, 'index']);
-    Route::post('/movements', [MovementController::class, 'create']);
-    Route::post('/movements/sugerir-voz', [MovementController::class, 'sugerirMovimientoConIA'])
-         ->middleware('throttle:5,1'); // opcional: limitar llamadas a la IA
-    Route::post('/tags/create', [TagController::class, 'store']);
-    Route::post('/tags/suggestion', [TagController::class, 'sugerirDesdeIA']);
-    Route::get('/tags', [TagController::class, 'index']);
 
-    // --- 2. AÑADE ESTAS DOS LÍNEAS PARA LA FUNCIÓN DEL CALENDARIO ---
-    
-    // `apiResource` crea automáticamente todas las rutas CRUD para las transacciones programadas.
-    // GET    /scheduled-transactions
-    // POST   /scheduled-transactions
-    // GET    /scheduled-transactions/{id}
-    // PUT    /scheduled-transactions/{id}
-    // DELETE /scheduled-transactions/{id}
-    Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
-
-    // Ruta específica para marcar una ocurrencia de un pago como "completado".
-    Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
-    Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
-    Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
+    // 1. HOME & USUARIO
     Route::get('/home-data', [AuthController::class, 'homeData']);
-    Route::get('/taxes/data', [TaxController::class, 'getData']);
-    
-    // Calendar & Reminders API
-    // Rutas nuevas versionadas para el frontend Flutter: /api/v1/calendar/reminders
-    Route::prefix('v1/calendar/reminders')->group(function () {
-        Route::get('/', [ReminderController::class, 'index']);
-        Route::post('/', [ReminderController::class, 'store']);
-        Route::get('/{reminder}', [ReminderController::class, 'show']);
-        Route::patch('/{reminder}', [ReminderController::class, 'update']);
-        Route::delete('/{reminder}', [ReminderController::class, 'destroy']);
-        Route::post('/{reminder}/mark-paid', [ReminderController::class, 'markAsPaid']);
-    });
+    Route::get('/financial-summary', [AuthController::class, 'financialSummary']);
 
-    // Alias legacy (por si algo viejo usa /api/reminders/*)
-    Route::prefix('reminders')->group(function () {
-        Route::get('/', [ReminderController::class, 'index']);
-        Route::post('/', [ReminderController::class, 'store']);
-        Route::get('/{reminder}', [ReminderController::class, 'show']);
-        Route::patch('/{reminder}', [ReminderController::class, 'update']);
-        Route::delete('/{reminder}', [ReminderController::class, 'destroy']);
-        Route::post('/{reminder}/mark-paid', [ReminderController::class, 'markAsPaid']);
-    });
-    
-    // Push Notification Tokens
-    Route::post('/push/register-token', [NotificationTokenController::class, 'register']);
-    Route::delete('/push/unregister-token/{token}', [NotificationTokenController::class, 'unregister']);
-    Route::get('/push/tokens', [NotificationTokenController::class, 'index']);
+    // 2. MOVIMIENTOS
+    Route::get('/movements', [MovementController::class, 'index']);
+    Route::post('/movements', [MovementController::class, 'store']);
+
+    // IA de Voz para Movimientos (Entiende gasto/ingreso + monto + metodo de pago)
+    Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
+        ->middleware('throttle:20,1');
+
+    // 3. ETIQUETAS (TAGS)
+    Route::get('/tags', [TagController::class, 'index']);
+    Route::post('/tags/create', [TagController::class, 'store']);
+    Route::post('/tags/suggestion', [TagController::class, 'suggest'])
+        ->middleware('throttle:20,1');
+
+    // 4. CALENDARIO & PROGRAMADOS
+    Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
+    Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
+    // (Opcional si usas lógica de transacciones complejas)
+    Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
+
+    // 5. ASISTENTES FINANCIEROS
+    // Análisis de ahorro mensual (50/30/20)
+    Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
+
+    // 6. IMPUESTOS (RADAR Y DECLARACIÓN)
+    Route::get('/taxes/data', [TaxController::class, 'getData']);        // Datos pre-llenados
+    Route::get('/taxes/alerts', [TaxController::class, 'checkLimits']);  // Semáforo Fiscal 2026
+
+    // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
+    Route::get('/budgets', [BudgetController::class, 'getBudgets']);
+    Route::get('/budgets/{budget}', [BudgetController::class, 'getBudget']);
+
+    // Rutas de creación
+    Route::post('/budgets/manual', [BudgetController::class, 'createManualBudget']);
+    Route::post('/budgets/ai/generate', [BudgetController::class, 'generateAIBudget'])->middleware('throttle:10,1');
+    Route::post('/budgets/ai/save', [BudgetController::class, 'saveAIBudget']);
+
+    // Gestión del presupuesto
+    Route::put('/budgets/{budget}', [BudgetController::class, 'updateBudget']);
+    Route::delete('/budgets/{budget}', [BudgetController::class, 'deleteBudget']);
+    Route::post('/budgets/{budget}/validate', [BudgetController::class, 'validateBudget']);
+
+    // Categorías dentro del presupuesto
+    Route::post('/budgets/{budget}/categories', [BudgetController::class, 'addCategory']);
+    Route::put('/budgets/{budget}/categories/{category}', [BudgetController::class, 'updateCategory']);
+    Route::delete('/budgets/{budget}/categories/{category}', [BudgetController::class, 'deleteCategory']);
+
+    // Voz específica para crear Presupuestos (No confundir con la de movimientos)
+    Route::post('/process-voice', [BudgetController::class, 'processVoiceCommand']);
+
+    // 8. METAS DE AHORRO (Saving Goals)
+    Route::get('/saving-goals', [SavingGoalController::class, 'index']);
+    Route::post('/saving-goals', [SavingGoalController::class, 'store']);
+    Route::get('/saving-goals/{saving_goal}', [SavingGoalController::class, 'show']);
+    Route::put('/saving-goals/{saving_goal}', [SavingGoalController::class, 'update']);
+    Route::delete('/saving-goals/{saving_goal}', [SavingGoalController::class, 'destroy']);
+
+    // 9. GOAL CONTRIBUTIONS (Abonos a Metas)
+    Route::get('/goal-contributions/{goalId}', [GoalContributionController::class, 'index']);
+    Route::post('/goal-contributions', [GoalContributionController::class, 'store']);
+    Route::delete('/goal-contributions/{contributionId}', [GoalContributionController::class, 'destroy']);
+    Route::get('/goal-contributions/{goalId}/stats', [GoalContributionController::class, 'stats']);
+
+    // 10. UNIFIED TRANSACTIONS (Vista Unificada)
+    Route::get('/transactions/unified', [FinanceTransactionController::class, 'unified']);
 });

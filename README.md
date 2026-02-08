@@ -1,61 +1,296 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# 💰 Finance API
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Sistema completo de finanzas personales con inteligencia artificial. API REST construida con Laravel 12 que incluye gestión de movimientos, presupuestos inteligentes, transacciones programadas y más.
 
-## About Laravel
+---
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## 🌟 Características Principales
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+### Core Features
+- ✅ **Authentication** - Registro y login con Laravel Sanctum
+- ✅ **Movements Management** - CRUD completo de movimientos financieros
+- ✅ **Smart Budgets** - Sistema de presupuestos con dos modos:
+  - 📝 **Manual**: Crea presupuestos desde cero
+  - 🤖 **AI-Powered**: Genera categorías inteligentes con Groq AI
+- ✅ **Scheduled Transactions** - Transacciones recurrentes con cálculo automático
+- ✅ **Tags & Categories** - Organización flexible de gastos
+- ✅ **Savings Analysis** - Análisis basado en regla 50/30/20
+- ✅ **Tax Management** - Radar fiscal y gestión de impuestos
+- ✅ **Voice Commands** - IA para procesar comandos de voz
+- ✅ **Multi-language** - Detección automática de español e inglés
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+### AI Features
+- 🧠 Generación inteligente de categorías de presupuesto
+- 🌍 Detección automática de idioma (ES/EN)
+- 📊 Clasificación automática de tipo de plan
+- 🎯 Sugerencias personalizadas basadas en el contexto
+- 💬 Procesamiento de voz para movimientos rápidos
 
-## Learning Laravel
+---
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+## 🚀 Quick Start
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+### Prerequisites
+- PHP 8.2+
+- Composer
+- Node.js & NPM
+- MySQL 8+ / PostgreSQL 13+
+- Groq API Key (gratuita en [groq.com](https://groq.com))
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+### Installation
 
-## Laravel Sponsors
+```bash
+# 1. Clone repository
+git clone <repository-url>
+cd Api_finanzas
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+# 2. Install dependencies
+composer install
+npm install
 
-### Premium Partners
+# 3. Setup environment
+cp .env.example .env
+php artisan key:generate
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+# 4. Configure database in .env
+# DB_DATABASE=your_database
+# DB_USERNAME=your_username
+# DB_PASSWORD=your_password
 
-## Contributing
+# 5. Add Groq API key in .env
+# GROQ_API_KEY=gsk_your_api_key
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+# 6. Run migrations
+php artisan migrate
 
-## Code of Conduct
+# 7. Start development server
+composer dev
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+The API will be available at `http://localhost:8000`
 
-## Security Vulnerabilities
+For detailed installation instructions, see [docs/INSTALLATION.md](docs/INSTALLATION.md)
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+---
 
-## License
+## 📡 API Endpoints
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+### Authentication
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/register` | Register new user |
+| POST | `/api/login` | Login user |
+
+### Budget Management
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/budgets` | List all budgets |
+| GET | `/api/budgets/{id}` | Get specific budget |
+| POST | `/api/budgets/manual` | Create manual budget |
+| POST | `/api/budgets/ai/generate` | Generate AI suggestions |
+| POST | `/api/budgets/ai/save` | Save AI budget |
+| PUT | `/api/budgets/{id}` | Update budget |
+| DELETE | `/api/budgets/{id}` | Delete budget |
+| POST | `/api/budgets/{id}/validate` | Validate budget |
+| POST | `/api/budgets/{id}/categories` | Add category |
+| PUT | `/api/budgets/{id}/categories/{cat_id}` | Update category |
+| DELETE | `/api/budgets/{id}/categories/{cat_id}` | Delete category |
+
+### Movements
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/movements` | List all movements |
+| POST | `/api/movements` | Create movement |
+| POST | `/api/movements/sugerir-voz` | Voice command (AI) |
+
+### Tags
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/tags` | List tags |
+| POST | `/api/tags/create` | Create tag |
+| POST | `/api/tags/suggestion` | Get AI tag suggestions |
+
+### Scheduled Transactions
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/scheduled-transactions` | List scheduled transactions |
+| POST | `/api/scheduled-transactions` | Create scheduled transaction |
+| GET | `/api/scheduled-transactions/{id}` | Get scheduled transaction |
+| PUT | `/api/scheduled-transactions/{id}` | Update scheduled transaction |
+| DELETE | `/api/scheduled-transactions/{id}` | Delete scheduled transaction |
+| POST | `/api/scheduled-transactions/{id}/toggle-paid` | Toggle paid status |
+
+### Analysis
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/savings/analyze` | Analyze savings (50/30/20) |
+| GET | `/api/taxes/data` | Get tax data |
+| GET | `/api/taxes/alerts` | Get tax alerts |
+| GET | `/api/home-data` | Get dashboard data |
+
+For complete API documentation with examples, see [docs/API.md](docs/API.md)
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [API Documentation](docs/API.md) | Complete API reference with all endpoints |
+| [Budget System](docs/BUDGET_SYSTEM.md) | Detailed budget system guide |
+| [Installation](docs/INSTALLATION.md) | Installation and setup instructions |
+| [Flutter Integration](docs/FLUTTER_INTEGRATION.md) | Flutter app integration guide |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+
+---
+
+## 🧪 Testing
+
+### Run all tests
+```bash
+composer test
+```
+
+### Run specific test
+```bash
+php artisan test --filter test_create_manual_budget
+```
+
+### Run test suite
+```bash
+php artisan test --testsuite=Feature
+```
+
+### Code quality
+```bash
+# Format code with Laravel Pint
+vendor/bin/pint
+
+# Check code style without modifying
+vendor/bin/pint --test
+```
+
+---
+
+## 🏗️ Tech Stack
+
+### Backend
+- **Framework**: Laravel 12.0
+- **PHP**: 8.2+
+- **Database**: MySQL / PostgreSQL / SQLite
+- **Authentication**: Laravel Sanctum
+- **Queue**: Database Queue
+- **Testing**: PHPUnit 11.5+
+- **Code Style**: Laravel Pint 1.22.1
+
+### AI Integration
+- **Provider**: Groq AI
+- **Models**: Llama 3.1, Gemma 2, Mixtral
+- **Features**: Budget generation, voice commands, tag suggestions
+
+### Frontend
+- **Build Tool**: Vite 6.2+
+- **CSS**: TailwindCSS 4.0
+- **HTTP Client**: Axios 1.8+
+
+---
+
+## 📊 Budget System Modes
+
+### Mode 1: Manual Budget
+Users create budgets from scratch with full control:
+1. Define title, description, and total amount
+2. Create categories manually with amounts
+3. System validates exact sum
+4. Auto-detects language and plan type
+5. Calculates percentages automatically
+
+### Mode 2: AI-Powered Budget
+AI generates intelligent budget suggestions:
+1. User provides title, description, and amount
+2. AI analyzes context and plan type
+3. Generates 3-7 relevant categories
+4. Provides amounts, reasons, and general advice
+5. User can edit before saving
+6. System ensures exact sum with auto-correction
+
+### Plan Types
+The system automatically classifies plans:
+- 🌍 **Travel** - Viajes y vacaciones
+- 🎉 **Event** - Eventos corporativos y sociales
+- 🎂 **Party** - Fiestas y celebraciones
+- 🛒 **Purchase** - Compras grandes
+- 🔨 **Project** - Proyectos de construcción/reforma
+- 📦 **Other** - Otros tipos de planes
+
+---
+
+## 🔐 Security
+
+- ✅ Authentication with Laravel Sanctum
+- ✅ Authorization checks on all endpoints
+- ✅ Input validation and sanitization
+- ✅ SQL injection protection (Eloquent ORM)
+- ✅ XSS protection
+- ✅ Rate limiting on sensitive endpoints
+- ✅ CSRF protection
+- ✅ CORS configuration
+
+---
+
+## 📈 Performance
+
+- ✅ Database query optimization with eager loading
+- ✅ Redis caching support
+- ✅ Queue system for background jobs
+- ✅ Response caching where appropriate
+- ✅ Optimized database indexes
+
+---
+
+## 🤝 Contributing
+
+1. Fork repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Run tests (`composer test`)
+5. Format code (`vendor/bin/pint`)
+6. Push to branch (`git push origin feature/AmazingFeature`)
+7. Open a Pull Request
+
+### Coding Standards
+- Follow PSR-12 coding standards
+- Use Laravel Pint for formatting
+- Write tests for new features
+- Add documentation for new endpoints
+
+---
+
+## 📄 License
+
+This project is licensed under MIT License.
+
+---
+
+## 🆘 Support
+
+For issues and questions:
+
+1. Check [Troubleshooting Guide](docs/TROUBLESHOOTING.md)
+2. Review [API Documentation](docs/API.md)
+3. Check Laravel Documentation: https://laravel.com/docs
+4. Review Groq API Documentation: https://console.groq.com/docs
+
+---
+
+## 🙏 Acknowledgments
+
+- Laravel Framework
+- Groq AI API
+- Open Source Community
+
+---
+
+**Version**: 1.0.0
+**Last Updated**: January 2026
+**Status**: ✅ Production Ready

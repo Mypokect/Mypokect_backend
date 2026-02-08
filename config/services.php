@@ -35,8 +35,8 @@ return [
         ],
     ],
     'groq' => [
-    'key' => env('GROQ_KEY'),
-    'model' => env('GROQ_MODEL', 'llama3-8b-8192'), // Puedes poner un valor por defecto
+        'key' => env('GROQ_KEY'),
+        'model' => env('GROQ_MODEL', 'llama3-8b-8192'), // Puedes poner un valor por defecto
     ],
 
     'fcm' => [
