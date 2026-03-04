@@ -83,6 +83,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/budgets/{budget}', [BudgetController::class, 'updateBudget']);
     Route::delete('/budgets/{budget}', [BudgetController::class, 'deleteBudget']);
     Route::post('/budgets/{budget}/validate', [BudgetController::class, 'validateBudget']);
+    Route::get('/budgets/{budget}/spending', [BudgetController::class, 'getSpending']);
+    Route::get('/budgets/{budget}/suggested-tags', [BudgetController::class, 'getSuggestedTags'])->middleware('throttle:20,1');
+    Route::delete('/budgets/{budget}/suggested-tags-cache', [BudgetController::class, 'clearSuggestedTagsCache']);
+    Route::post('/budgets/{budget}/apply-ai-tags', [BudgetController::class, 'applyAITags']);
+    Route::post('/budgets/{budget}/reactivate', [BudgetController::class, 'reactivateBudget']);
+    Route::post('/budgets/{budget}/duplicate', [BudgetController::class, 'duplicateBudget']);
 
     // Categorías dentro del presupuesto
     Route::post('/budgets/{budget}/categories', [BudgetController::class, 'addCategory']);

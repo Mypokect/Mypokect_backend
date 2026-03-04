@@ -125,7 +125,7 @@ class TaxController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error: ' . $e->getMessage());
+            return $this->errorResponse('Error: '.$e->getMessage());
         }
     }
 

@@ -18,12 +18,10 @@ class OccurrenceCalculatorService
         // 1. Obtenemos TODAS las ocurrencias que ya han sido marcadas como pagadas en este mes.
         // Las guardamos en un formato fácil de buscar: ['2025-11-04' => true, '2025-11-15' => true]
         $paidStatuses = TransactionOccurrence::query()
-            ->where('user_id', $user->id) // Asumiendo que añades user_id a la tabla de ocurrencias
-            // O si no tienes user_id, se puede hacer con un join:
-            // ->whereHas('scheduledTransaction', fn($q) => $q->where('user_id', $user->id))
-            ->whereBetween('occurrence_date', [$startOfMonth, $endOfMonth])
+            ->whereHas('scheduledTransaction', fn ($q) => $q->where('user_id', $user->id))
+            ->whereBetween('due_date', [$startOfMonth, $endOfMonth])
             ->where('is_paid', true)
-            ->pluck('occurrence_date')
+            ->pluck('due_date')
             ->mapWithKeys(fn ($date) => [$date->format('Y-m-d') => true])
             ->all();
 

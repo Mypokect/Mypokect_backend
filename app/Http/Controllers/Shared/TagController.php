@@ -10,6 +10,7 @@ use App\Http\Traits\ApiResponse;
 use App\Models\Tag;
 use App\Services\MovementAIService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 
@@ -26,21 +27,29 @@ class TagController extends Controller
 
     /**
      * Get all tags for the authenticated user.
+     * Optional filter: ?type=expense|income (only tags used in movements of that type)
      */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         try {
             $user = Auth::user();
 
-            $tags = Tag::where('user_id', $user->id)
-                ->orderBy('name')
-                ->get();
+            $query = Tag::where('user_id', $user->id);
+
+            if ($request->has('type') && in_array($request->type, ['expense', 'income'])) {
+                $query->whereHas('movements', function ($q) use ($request) {
+                    $q->where('type', $request->type);
+                });
+            }
+
+            $tags = $query->orderBy('name')->get();
 
             return $this->successResponse(TagResource::collection($tags));
 
         } catch (\Exception $e) {
             Log::error('Error fetching tags: '.$e->getMessage());
-            return $this->errorResponse('Error servidor: ' . $e->getMessage());
+
+            return $this->errorResponse('Error servidor: '.$e->getMessage());
         }
     }
 
@@ -67,7 +76,8 @@ class TagController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error saving tag: '.$e->getMessage());
-            return $this->errorResponse('Error servidor: ' . $e->getMessage());
+
+            return $this->errorResponse('Error servidor: '.$e->getMessage());
         }
     }
 
@@ -94,7 +104,8 @@ class TagController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error generating tag suggestion: '.$e->getMessage());
-            return $this->errorResponse('No se pudo sugerir: ' . $e->getMessage());
+
+            return $this->errorResponse('No se pudo sugerir: '.$e->getMessage());
         }
     }
 }

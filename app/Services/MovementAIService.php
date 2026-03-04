@@ -613,6 +613,411 @@ class MovementAIService
     }
 
     /**
+     * Match individual movements to budget categories using AI.
+     * NEW APPROACH: Analyzes each movement separately based on its description.
+     *
+     * @param  array  $categories  Category names, e.g. ["Hotel", "Transporte", "Comida"]
+     * @param  array  $movements  Each item: ["tag" => "Servicio", "description" => "hotel marriott", "amount" => 800000]
+     * @return array Map of category name => array of unique tag names
+     */
+    public function matchMovementsToCategories(array $categories, array $movements): array
+    {
+        if (empty($movements) || empty($categories)) {
+            $result = [];
+            foreach ($categories as $cat) {
+                $result[$cat] = [];
+            }
+            return $result;
+        }
+
+        // Limit movements to avoid huge prompts (take top by amount)
+        $limitedMovements = collect($movements)
+            ->sortByDesc('amount')
+            ->take(150)
+            ->values()
+            ->toArray();
+
+        $categoriesList = implode(', ', $categories);
+
+        // Build movements list with indices
+        $movementsList = [];
+        foreach ($limitedMovements as $idx => $m) {
+            $tag = $m['tag'] ?? 'Sin etiqueta';
+            $desc = !empty($m['description']) ? $m['description'] : 'sin descripción';
+            $amount = number_format($m['amount'] ?? 0, 0, '', ',');
+            $movementsList[] = "[$idx] Tag: \"$tag\" | Desc: \"$desc\" | \$$amount";
+        }
+        $movementsText = implode("\n", $movementsList);
+
+        $prompt = <<<PROMPT
+            TAREA: Clasifica cada movimiento de gasto en la categoría del presupuesto que mejor corresponda.
+
+            ═══ CATEGORÍAS DEL PRESUPUESTO ═══
+            [$categoriesList]
+
+            ═══ MOVIMIENTOS DEL USUARIO ═══
+            $movementsText
+
+            ═══ INSTRUCCIONES ═══
+
+            Analiza CADA movimiento individualmente:
+
+            1. Lee el TAG y la DESCRIPCIÓN del movimiento
+            2. Determina de qué tipo de gasto se trata
+            3. Asigna el movimiento a la categoría que mejor corresponda
+
+            ═══ REGLAS CRÍTICAS ═══
+
+            1. La DESCRIPCIÓN es MÁS IMPORTANTE que el nombre del TAG:
+               * Tag "Servicio" + Desc "hotel marriott" → Hotel/Hospedaje
+               * Tag "Servicio" + Desc "taxi aeropuerto" → Transporte
+               * Tag "Varios" + Desc "almuerzo restaurante" → Comida
+
+            2. Si un movimiento NO tiene descripción (dice "sin descripción"):
+               → Usa el nombre del TAG Y haz matching semántico con las categorías
+               → Ejemplos:
+                 • Tag "Servicio" sin desc → busca categorías con "servicio", "hotel", "transporte"
+                 • Tag "Comida" sin desc → busca categorías con "comida", "alimento", "restaurante"
+                 • Tag "Transporte" sin desc → busca categorías con "transporte", "movilidad", "taxi"
+
+            3. MATCHING SEMÁNTICO: Si un TAG coincide parcialmente con el nombre de una categoría, asígnalo:
+               * Tag "Servicio" puede ir a "Servicio hotel", "Transporte hotel" (ambos son servicios)
+               * Tag "Comida" puede ir a "Comida en viaje", "Comida y bebida"
+               * Tag "Transporte" puede ir a "Transporte hotel", "Transporte y movilidad"
+
+            4. Si múltiples categorías podrían funcionar, elige la más específica o la primera alfabéticamente
+
+            5. Cada movimiento va a UNA SOLA categoría (la mejor coincidencia)
+
+            6. IMPORTANTE: Movimientos con el MISMO TAG pueden ir a DIFERENTES categorías
+               si sus descripciones son diferentes:
+               * [0] Tag: "Servicio" | Desc: "hotel costa rica" → Hotel
+               * [5] Tag: "Servicio" | Desc: "compra regalo" → Regalos
+               (Ambos tienen tag "Servicio" pero van a categorías diferentes por sus descripciones)
+
+            7. USA los nombres EXACTOS de las categorías (respeta mayúsculas/minúsculas)
+
+            8. Responde SOLO con JSON, sin texto adicional antes o después
+
+            ═══ FORMATO DE SALIDA ═══
+            {
+              "Hotel": [0, 5, 12],
+              "Transporte": [1, 3, 7],
+              "Comida": [2, 4, 8, 10],
+              "Regalos": [],
+              "OtraCategoria": []
+            }
+
+            Donde los valores son arrays de índices [idx] de movimientos que pertenecen a esa categoría.
+            TODAS las categorías deben aparecer en el resultado (usa [] si no hay movimientos para esa categoría).
+        PROMPT;
+
+        Log::info('Llamando a Groq para analizar movimientos individuales', [
+            'movements_count' => count($limitedMovements),
+            'categories_count' => count($categories),
+        ]);
+
+        $response = $this->callGroqAPI($prompt, 0.2, 1500);
+
+        if (!$response) {
+            Log::warning('No se recibió respuesta de Groq - usando fallback de matching simple');
+            return $this->simpleFallbackMatching($categories, $limitedMovements);
+        }
+
+        $jsonString = $this->extractJson($response);
+        if (!$jsonString) {
+            Log::warning('No se pudo extraer JSON de la respuesta');
+            $result = [];
+            foreach ($categories as $cat) {
+                $result[$cat] = [];
+            }
+            return $result;
+        }
+
+        $decoded = json_decode($jsonString, true);
+        if (!is_array($decoded)) {
+            Log::error('JSON decodificado no es un array - usando fallback');
+            return $this->simpleFallbackMatching($categories, $limitedMovements);
+        }
+
+        // NUEVA ESTRATEGIA: En lugar de solo tags, extraer keywords de las descripciones
+        // para permitir matching preciso de movimientos individuales
+
+        $result = [];
+        foreach ($categories as $cat) {
+            $result[$cat] = [
+                'tags' => [],
+                'keywords' => []
+            ];
+        }
+
+        $categoryTags = []; // Para rastrear tags únicos por categoría
+        $categoryKeywords = []; // Para rastrear keywords por categoría
+
+        foreach ($categories as $cat) {
+            $indices = $decoded[$cat] ?? [];
+            $tags = [];
+            $keywords = [];
+
+            foreach ($indices as $idx) {
+                if (isset($limitedMovements[$idx])) {
+                    $tagName = $limitedMovements[$idx]['tag'] ?? 'Sin etiqueta';
+                    $description = trim($limitedMovements[$idx]['description'] ?? '');
+
+                    // Añadir tag único
+                    if (!in_array($tagName, $tags)) {
+                        $tags[] = $tagName;
+                    }
+
+                    // Extraer keywords de la descripción (palabras significativas)
+                    if (!empty($description) && $description !== 'sin descripción') {
+                        // Convertir a minúsculas y dividir en palabras
+                        $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($description), -1, PREG_SPLIT_NO_EMPTY);
+
+                        // Filtrar palabras muy cortas y stopwords comunes
+                        $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
+                        foreach ($words as $word) {
+                            if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word)) {
+                                if (!in_array($word, $keywords)) {
+                                    $keywords[] = $word;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            $categoryTags[$cat] = $tags;
+            $categoryKeywords[$cat] = $keywords;
+        }
+
+        // Construir resultado con tags y keywords
+        foreach ($categories as $cat) {
+            $result[$cat] = [
+                'tags' => array_values($categoryTags[$cat] ?? []),
+                'keywords' => array_values($categoryKeywords[$cat] ?? [])
+            ];
+        }
+
+        Log::info('Resultado de clasificación de movimientos con keywords', [
+            'result' => $result,
+        ]);
+
+        // VERIFICAR: Si Groq retornó TODO vacío, usar fallback
+        $allEmpty = true;
+        foreach ($result as $cat => $data) {
+            if (!empty($data['tags']) || !empty($data['keywords'])) {
+                $allEmpty = false;
+                break;
+            }
+        }
+
+        if ($allEmpty && count($limitedMovements) > 0) {
+            Log::warning('Groq retornó arrays vacíos para TODAS las categorías - usando fallback de matching simple');
+            return $this->simpleFallbackMatching($categories, $limitedMovements);
+        }
+
+        // POST-PROCESAMIENTO: Para categorías que quedaron vacías,
+        // intentar matching por nombre de categoría vs tags de movimientos
+        $this->fillEmptyCategoriesFromTagNames($result, $categories, $limitedMovements);
+
+        return $result;
+    }
+
+    /**
+     * DEPRECATED: Old approach that aggregates tags.
+     * Match user's spending tags to budget categories using AI.
+     * Uses tag names, amounts AND movement descriptions for accurate semantic matching.
+     *
+     * @param  array  $categories  Category names, e.g. ["Hospedaje", "Transporte", "Comida"]
+     * @param  array  $tagsWithAmounts  Each item: ["name" => "Hotel", "total" => 150000]
+     * @param  array  $tagDescriptions  Map of tag name => array of movement descriptions
+     * @return array Map of category name => array of tag names
+     */
+    public function matchTagsToCategories(array $categories, array $tagsWithAmounts, array $tagDescriptions = []): array
+    {
+        if (empty($tagsWithAmounts)) {
+            return [];
+        }
+
+        $categoriesList = implode(', ', $categories);
+
+        // Build tag info with descriptions for richer context
+        $tagsInfo = [];
+        foreach ($tagsWithAmounts as $t) {
+            $line = "{$t['name']} (\${$t['total']})";
+            $descs = $tagDescriptions[$t['name']] ?? [];
+            if (! empty($descs)) {
+                $descSample = implode(', ', array_slice($descs, 0, 5));
+                $line .= " — descripciones: [$descSample]";
+            }
+            $tagsInfo[] = $line;
+        }
+        $tagsList = implode("\n", $tagsInfo);
+
+        $prompt = <<<PROMPT
+            TAREA: Clasifica cada etiqueta (tag) de gasto en la categoría del presupuesto que mejor corresponda.
+
+            ═══ CONTEXTO ═══
+            El usuario tiene estas CATEGORÍAS en su presupuesto:
+            [$categoriesList]
+
+            Y tiene estas ETIQUETAS con sus gastos reales:
+            $tagsList
+
+            ═══ METODOLOGÍA ═══
+            Para cada etiqueta sigue estos pasos:
+
+            1. LEE las descripciones reales de los movimientos (si existen)
+            2. IDENTIFICA de qué tipo de gasto se trata basándote en las descripciones
+            3. ASIGNA la etiqueta a la categoría del presupuesto que mejor coincida
+
+            ═══ CASOS DE USO CRÍTICOS ═══
+
+            Caso 1: Tag genérico CON descripciones específicas
+            ✅ Tag "Varios" con descripciones: ["almuerzo restaurante", "cena familiar", "desayuno café"]
+               → Asignar a "Comida" o "Alimentación"
+               Razón: Las descripciones claramente hablan de comidas, NO importa que el tag se llame "Varios"
+
+            ✅ Tag "Servicio" con descripciones: ["hotel marriott", "hospedaje airbnb", "reserva hostal"]
+               → Asignar a "Hospedaje" o "Hotel" o "Alojamiento"
+               Razón: Las descripciones son de hospedaje, NO importa que el tag se llame "Servicio"
+
+            ✅ Tag "Gastos" con descripciones: ["uber aeropuerto", "taxi centro", "gasolina carro"]
+               → Asignar a "Transporte" o "Movilidad"
+               Razón: Las descripciones son de transporte
+
+            Caso 2: Tag específico SIN descripciones
+            ✅ Tag "Hotel" sin descripciones
+               → Asignar a "Hospedaje" o "Hotel" o "Alojamiento"
+               Razón: El nombre del tag es claro
+
+            ✅ Tag "Uber" sin descripciones
+               → Asignar a "Transporte" o "Movilidad"
+               Razón: Uber es claramente transporte
+
+            Caso 3: Tag con descripciones MIXTAS (contiene gastos de diferentes tipos)
+            ⚠️  Tag "Compras" con descripciones: ["hotel costa rica", "taxi aeropuerto", "almuerzo sodio"]
+               → Analiza cuál tipo predomina o cual tiene mayor monto
+               → Si es difícil decidir, asigna al tipo más común en las descripciones
+
+            ═══ REGLAS ESTRICTAS ═══
+            1. SIEMPRE prioriza las DESCRIPCIONES sobre el nombre del tag
+            2. Si NO hay descripciones, usa el nombre del tag con sentido común
+            3. Cada tag va a UNA SOLA categoría (la mejor coincidencia)
+            4. Si un tag no encaja en NINGUNA categoría, NO lo incluyas
+            5. USA los nombres EXACTOS de las categorías (respeta mayúsculas/minúsculas)
+            6. Devuelve SOLO JSON válido, SIN texto adicional antes o después
+            7. TODAS las categorías del presupuesto DEBEN aparecer en el resultado (aunque sea vacías [])
+
+            ═══ FORMATO DE SALIDA ═══
+            {
+              "Hospedaje": ["Hotel", "Servicio"],
+              "Transporte": ["Uber", "Gastos"],
+              "Comida": ["Varios", "Restaurantes"],
+              "OtraCategoria": []
+            }
+
+            Responde SOLO con el JSON, nada más.
+        PROMPT;
+
+        $response = $this->callGroqAPI($prompt, 0.2, 1000);
+
+        if (! $response) {
+            return [];
+        }
+
+        $jsonString = $this->extractJson($response);
+        if (! $jsonString) {
+            return [];
+        }
+
+        $decoded = json_decode($jsonString, true);
+        if (! is_array($decoded)) {
+            return [];
+        }
+
+        // Ensure all categories are present in the output
+        foreach ($categories as $cat) {
+            if (! isset($decoded[$cat])) {
+                $decoded[$cat] = [];
+            }
+        }
+
+        return $decoded;
+    }
+
+    /**
+     * Post-processing: fill empty categories by matching tag names to category names.
+     * If a category got no AI assignment but its name matches a tag name, assign it.
+     */
+    protected function fillEmptyCategoriesFromTagNames(array &$result, array $categories, array $movements): void
+    {
+        // Collect all tags already assigned to categories
+        $assignedTags = [];
+        foreach ($result as $data) {
+            foreach ($data['tags'] ?? [] as $tag) {
+                $assignedTags[] = $tag;
+            }
+        }
+
+        // Group movements by tag
+        $movementsByTag = [];
+        foreach ($movements as $m) {
+            $tag = $m['tag'] ?? 'Sin etiqueta';
+            if (!isset($movementsByTag[$tag])) {
+                $movementsByTag[$tag] = [];
+            }
+            $movementsByTag[$tag][] = $m;
+        }
+
+        foreach ($categories as $catName) {
+            // Skip if category already has tags
+            if (!empty($result[$catName]['tags'])) {
+                continue;
+            }
+
+            $catLower = mb_strtolower($catName);
+            $catWords = preg_split('/[\s\-_]+/', $catLower, -1, PREG_SPLIT_NO_EMPTY);
+
+            // Check if any unassigned tag matches this category name
+            foreach ($movementsByTag as $tagName => $tagMovements) {
+                $tagLower = mb_strtolower($tagName);
+
+                // Match: tag name appears in category name, or category word appears in tag name
+                $matches = false;
+                foreach ($catWords as $word) {
+                    if (strlen($word) < 3) continue;
+                    if (mb_strpos($tagLower, $word) !== false || mb_strpos($catLower, $tagLower) !== false) {
+                        $matches = true;
+                        break;
+                    }
+                }
+
+                if ($matches && !in_array($tagName, $result[$catName]['tags'])) {
+                    $result[$catName]['tags'][] = $tagName;
+
+                    // Extract keywords from movement descriptions
+                    $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
+                    foreach ($tagMovements as $mov) {
+                        $desc = trim($mov['description'] ?? '');
+                        if (!empty($desc) && $desc !== 'sin descripción') {
+                            $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($desc), -1, PREG_SPLIT_NO_EMPTY);
+                            foreach ($words as $word) {
+                                if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word) && !in_array($word, $result[$catName]['keywords'])) {
+                                    $result[$catName]['keywords'][] = $word;
+                                }
+                            }
+                        }
+                    }
+
+                    Log::info("fillEmptyCategoriesFromTagNames: assigned tag '$tagName' to category '$catName'");
+                }
+            }
+        }
+    }
+
+    /**
      * Extract the first valid JSON object from a string.
      */
     protected function extractJson(string $text): ?string
@@ -636,5 +1041,112 @@ class MovementAIService
         Log::debug('=== EXTRACT JSON SUCCESS ===', ['extracted_length' => strlen($extracted)]);
 
         return $extracted;
+    }
+
+    /**
+     * Simple fallback matching when AI fails.
+     * Matches tags to categories based on semantic similarity in names.
+     */
+    protected function simpleFallbackMatching(array $categories, array $movements): array
+    {
+        Log::info('=== SIMPLE FALLBACK MATCHING STARTED ===', [
+            'categories_count' => count($categories),
+            'movements_count' => count($movements),
+        ]);
+
+        $result = [];
+        foreach ($categories as $cat) {
+            $result[$cat] = [
+                'tags' => [],
+                'keywords' => []
+            ];
+        }
+
+        // Agrupar movimientos por tag
+        $movementsByTag = [];
+        foreach ($movements as $m) {
+            $tag = $m['tag'] ?? 'Sin etiqueta';
+            if (!isset($movementsByTag[$tag])) {
+                $movementsByTag[$tag] = [];
+            }
+            $movementsByTag[$tag][] = $m;
+        }
+
+        Log::info('Tags únicos encontrados', ['tags' => array_keys($movementsByTag)]);
+
+        // Para cada categoría, buscar tags que coincidan semánticamente
+        foreach ($categories as $categoryName) {
+            $categoryLower = mb_strtolower($categoryName);
+            $categoryWords = preg_split('/[\s\-_]+/', $categoryLower, -1, PREG_SPLIT_NO_EMPTY);
+
+            $matchedTags = [];
+            $keywords = [];
+
+            foreach ($movementsByTag as $tagName => $tagMovements) {
+                $tagLower = mb_strtolower($tagName);
+                $shouldMatch = false;
+
+                // Estrategia 1: Coincidencia exacta de palabras
+                foreach ($categoryWords as $word) {
+                    if (strlen($word) < 3) continue;
+                    if (mb_strpos($tagLower, $word) !== false || mb_strpos($categoryLower, $tagLower) !== false) {
+                        $shouldMatch = true;
+                        break;
+                    }
+                }
+
+                // Estrategia 2: Matching semántico manual
+                if (!$shouldMatch) {
+                    $semanticRules = [
+                        'servicio' => ['servicio', 'hotel', 'hospedaje', 'alojamiento', 'arriendo'],
+                        'comida' => ['comida', 'alimento', 'restaurante', 'bebida'],
+                        'transporte' => ['transporte', 'movilidad', 'taxi', 'uber', 'viaje'],
+                        'compras' => ['compras', 'compra', 'shopping'],
+                    ];
+
+                    foreach ($semanticRules as $keyword => $synonyms) {
+                        if (mb_strpos($tagLower, $keyword) !== false) {
+                            foreach ($synonyms as $syn) {
+                                if (mb_strpos($categoryLower, $syn) !== false) {
+                                    $shouldMatch = true;
+                                    break 2;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ($shouldMatch && !in_array($tagName, $matchedTags)) {
+                    $matchedTags[] = $tagName;
+
+                    // Extraer keywords de descripciones
+                    foreach ($tagMovements as $mov) {
+                        $desc = trim($mov['description'] ?? '');
+                        if (!empty($desc) && $desc !== 'sin descripción') {
+                            $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($desc), -1, PREG_SPLIT_NO_EMPTY);
+                            $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
+                            foreach ($words as $word) {
+                                if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word) && !in_array($word, $keywords)) {
+                                    $keywords[] = $word;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            $result[$categoryName] = [
+                'tags' => array_values($matchedTags),
+                'keywords' => array_values($keywords)
+            ];
+
+            Log::info("Fallback matching para '{$categoryName}'", [
+                'matched_tags' => $matchedTags,
+                'keywords_count' => count($keywords),
+            ]);
+        }
+
+        Log::info('=== SIMPLE FALLBACK MATCHING COMPLETED ===');
+        return $result;
     }
 }

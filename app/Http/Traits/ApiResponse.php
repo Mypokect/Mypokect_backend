@@ -9,10 +9,7 @@ trait ApiResponse
     /**
      * Return a success JSON response
      *
-     * @param mixed $data
-     * @param string $message
-     * @param int $code
-     * @return JsonResponse
+     * @param  mixed  $data
      */
     protected function successResponse($data = null, string $message = '', int $code = 200): JsonResponse
     {
@@ -20,7 +17,7 @@ trait ApiResponse
             'status' => 'success',
         ];
 
-        if (!empty($message)) {
+        if (! empty($message)) {
             $response['message'] = $message;
         }
 
@@ -34,10 +31,7 @@ trait ApiResponse
     /**
      * Return an error JSON response
      *
-     * @param string $message
-     * @param int $code
-     * @param mixed $errors
-     * @return JsonResponse
+     * @param  mixed  $errors
      */
     protected function errorResponse(string $message, int $code = 500, $errors = null): JsonResponse
     {
@@ -56,9 +50,7 @@ trait ApiResponse
     /**
      * Return a validation error response
      *
-     * @param mixed $errors
-     * @param string $message
-     * @return JsonResponse
+     * @param  mixed  $errors
      */
     protected function validationErrorResponse($errors, string $message = 'Validation failed'): JsonResponse
     {
@@ -67,9 +59,6 @@ trait ApiResponse
 
     /**
      * Return an unauthorized response
-     *
-     * @param string $message
-     * @return JsonResponse
      */
     protected function unauthorizedResponse(string $message = 'No autorizado'): JsonResponse
     {
@@ -78,9 +67,6 @@ trait ApiResponse
 
     /**
      * Return a not found response
-     *
-     * @param string $message
-     * @return JsonResponse
      */
     protected function notFoundResponse(string $message = 'Recurso no encontrado'): JsonResponse
     {
@@ -90,9 +76,7 @@ trait ApiResponse
     /**
      * Return a created response
      *
-     * @param mixed $data
-     * @param string $message
-     * @return JsonResponse
+     * @param  mixed  $data
      */
     protected function createdResponse($data = null, string $message = 'Recurso creado exitosamente'): JsonResponse
     {
@@ -101,9 +85,6 @@ trait ApiResponse
 
     /**
      * Return a deleted response
-     *
-     * @param string $message
-     * @return JsonResponse
      */
     protected function deletedResponse(string $message = 'Recurso eliminado exitosamente'): JsonResponse
     {
@@ -112,8 +93,6 @@ trait ApiResponse
 
     /**
      * Return a no content response
-     *
-     * @return JsonResponse
      */
     protected function noContentResponse(): JsonResponse
     {

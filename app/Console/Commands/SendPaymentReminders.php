@@ -32,7 +32,7 @@ class SendPaymentReminders extends Command
                     if ($nextOccurrenceDate) {
                         // Comprobar si esta ocurrencia específica ya fue pagada
                         $isPaid = $transaction->occurrences()
-                            ->where('occurrence_date', $nextOccurrenceDate->toDateString())
+                            ->where('due_date', $nextOccurrenceDate->toDateString())
                             ->where('is_paid', true)
                             ->exists();
 

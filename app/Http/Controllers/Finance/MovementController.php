@@ -44,7 +44,8 @@ class MovementController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error fetching movements: '.$e->getMessage());
-            return $this->errorResponse('An error occurred while fetching movements: ' . $e->getMessage());
+
+            return $this->errorResponse('An error occurred while fetching movements: '.$e->getMessage());
         }
     }
 
@@ -93,7 +94,8 @@ class MovementController extends Controller
         } catch (\Exception $e) {
             DB::rollBack();
             Log::error('Error creating movement: '.$e->getMessage());
-            return $this->errorResponse('An error occurred while creating the movement: ' . $e->getMessage());
+
+            return $this->errorResponse('An error occurred while creating the movement: '.$e->getMessage());
         }
     }
 
@@ -117,7 +119,8 @@ class MovementController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error processing voice suggestion: '.$e->getMessage());
-            return $this->errorResponse('Error AI process: ' . $e->getMessage());
+
+            return $this->errorResponse('Error AI process: '.$e->getMessage());
         }
     }
 }

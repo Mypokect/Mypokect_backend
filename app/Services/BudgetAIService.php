@@ -56,14 +56,28 @@ class BudgetAIService
     /**
      * Core AI Generation Logic
      */
-    public function generateBudgetWithAI(string $title, float $amount, string $description): array
+    public function generateBudgetWithAI(string $title, float $amount, string $description, array $userTags = []): array
     {
         $language = $this->detectLanguage($title.' '.$description);
         $planType = $this->classifyPlanType($title.' '.$description);
 
-        $langInstruction = $language === 'es'
-            ? 'RESPOND ONLY IN SPANISH. Translate all category names and reasons to Spanish.'
-            : 'RESPOND ONLY IN ENGLISH.';
+        $tagsList = empty($userTags) ? 'None' : implode(', ', $userTags);
+
+        $tagsInstruction = empty($userTags)
+            ? ''
+            : <<<TAGS
+
+        Tag matching:
+        - The user has these existing tags: [$tagsList]
+        - For each category, suggest which of these tags correspond to that spending category.
+        - Only suggest tags that are semantically related to the category.
+        - If no existing tag matches, return an empty array.
+        - Do NOT invent new tags — only use tags from the list above.
+        TAGS;
+
+        $suggestedTagsField = empty($userTags)
+            ? ''
+            : ', "suggested_tags": ["tag1"]';
 
         $prompt = <<<PROMPT
         Create a realistic and structured budget for a "$planType" plan.
@@ -92,6 +106,12 @@ class BudgetAIService
         - reason (2–5 words, concrete)
         - The sum of all amounts MUST equal total exactly.
         - Amount distribution must be logical (no random splits).
+        {$tagsInstruction}
+
+        Timing:
+        - Infer duration from context (e.g. "5 días"→5, "mes"→30, "quincena"→15, "semana"→7).
+        - suggested_period: weekly (≤7d), biweekly (8–15d), monthly (16–31d), custom (>31d).
+        - duration_days: integer. Default 30 if unclear.
 
         Advice:
         - Add ONE short, strategic general_advice related to the plan.
@@ -103,9 +123,11 @@ class BudgetAIService
         Format:
         {
         "categories": [
-            { "name": "", "amount": 0, "reason": "" }
+            { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
         ],
-        "general_advice": ""
+        "general_advice": "",
+        "suggested_period": "monthly",
+        "duration_days": 30
         }
 
         PROMPT;
@@ -121,7 +143,7 @@ class BudgetAIService
                 ])->post($this->baseUrl, [
                     'model' => $model,
                     'messages' => [['role' => 'user', 'content' => $prompt]],
-                    'temperature' => 0.45,
+                    'temperature' => 0.3,
                     'response_format' => ['type' => 'json_object'],
                 ]);
 
@@ -163,13 +185,25 @@ class BudgetAIService
                             }
                         }
 
-                        // Recalculate percentages
+                        // Recalculate percentages and normalize suggested_tags
                         foreach ($categories as &$cat) {
                             $cat['percentage'] = round(($cat['amount'] / $amount) * 100, 2);
+                            $cat['suggested_tags'] = isset($cat['suggested_tags']) && is_array($cat['suggested_tags'])
+                                ? array_values(array_intersect($cat['suggested_tags'], $userTags))
+                                : [];
                         }
                         unset($cat); // Unset reference
 
                         $content['categories'] = $categories;
+
+                        // Validate timing fields (defaults if AI omitted them)
+                        $validPeriods = ['weekly', 'biweekly', 'monthly', 'custom'];
+                        if (!isset($content['suggested_period']) || !in_array($content['suggested_period'], $validPeriods)) {
+                            $content['suggested_period'] = 'monthly';
+                        }
+                        $content['duration_days'] = isset($content['duration_days']) && is_numeric($content['duration_days'])
+                            ? max(1, (int) $content['duration_days'])
+                            : 30;
                         // =============================================
 
                         return [

@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Validator;
 class AuthController extends Controller
 {
     use ApiResponse;
+
     /**
      * Handle user login
      */

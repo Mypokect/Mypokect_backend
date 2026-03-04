@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Validator;
 class SavingGoalController extends Controller
 {
     use ApiResponse;
+
     public function index(): JsonResponse
     {
         try {
@@ -39,7 +40,7 @@ class SavingGoalController extends Controller
             return $this->successResponse($goals);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error fetching saving goals: ' . $e->getMessage());
+            return $this->errorResponse('Error fetching saving goals: '.$e->getMessage());
         }
     }
 
@@ -79,7 +80,7 @@ class SavingGoalController extends Controller
             return $this->createdResponse(['saving_goal' => $goal], 'Saving goal created successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error creating saving goal: ' . $e->getMessage());
+            return $this->errorResponse('Error creating saving goal: '.$e->getMessage());
         }
     }
 
@@ -106,7 +107,7 @@ class SavingGoalController extends Controller
             return $this->successResponse($goal);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error fetching saving goal: ' . $e->getMessage());
+            return $this->errorResponse('Error fetching saving goal: '.$e->getMessage());
         }
     }
 
@@ -168,7 +169,7 @@ class SavingGoalController extends Controller
             return $this->successResponse(['saving_goal' => $goal], 'Saving goal updated successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error updating saving goal: ' . $e->getMessage());
+            return $this->errorResponse('Error updating saving goal: '.$e->getMessage());
         }
     }
 
@@ -183,7 +184,7 @@ class SavingGoalController extends Controller
             return $this->deletedResponse('Saving goal deleted successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error deleting saving goal: ' . $e->getMessage());
+            return $this->errorResponse('Error deleting saving goal: '.$e->getMessage());
         }
     }
 }

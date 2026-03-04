@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Validator;
 class ScheduledTransactionController extends Controller
 {
     use ApiResponse;
+
     /**
      * Devuelve todas las ocurrencias de transacciones para un mes/año,
      * con el estado de pago ('is_paid') verificado correctamente.
@@ -40,11 +41,11 @@ class ScheduledTransactionController extends Controller
         // El formato será: ['2025-11-06' => [1 => true], '2025-11-15' => [2 => true]]
         // Significa: en la fecha X, la transacción con id Y está pagada.
         $paidOccurrencesMap = TransactionOccurrence::query()
-            ->where('user_id', $user->id)
-            ->whereBetween('occurrence_date', [$startOfMonth, $endOfMonth])
+            ->whereHas('scheduledTransaction', fn ($q) => $q->where('user_id', $user->id))
+            ->whereBetween('due_date', [$startOfMonth, $endOfMonth])
             ->where('is_paid', true)
-            ->get(['occurrence_date', 'scheduled_transaction_id'])
-            ->groupBy(fn ($item) => $item->occurrence_date->format('Y-m-d'))
+            ->get(['due_date', 'scheduled_transaction_id'])
+            ->groupBy(fn ($item) => $item->due_date->format('Y-m-d'))
             ->map(fn ($itemsOnDate) => $itemsOnDate->keyBy('scheduled_transaction_id')->map(fn () => true))
             ->all();
 
@@ -137,11 +138,10 @@ class ScheduledTransactionController extends Controller
         $occurrence = $scheduledTransaction->occurrences()->updateOrCreate(
             [
                 'scheduled_transaction_id' => $scheduledTransaction->id,
-                'occurrence_date' => $validatedData['date'],
+                'due_date' => $validatedData['date'],
             ],
             [
-                'is_paid' => $validatedData['is_paid',
-                'user_id' => Auth::id(),
+                'is_paid' => $validatedData['is_paid'],
             ]
         );
 

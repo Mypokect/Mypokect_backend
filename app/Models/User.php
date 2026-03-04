@@ -14,7 +14,6 @@ class User extends Authenticatable
 
     protected $fillable = [
         'name',
-        'email',
         'password',
         'country_code',
         'phone',
@@ -23,7 +22,7 @@ class User extends Authenticatable
 
     protected $hidden = ['password', 'remember_token'];
 
-    protected $casts = ['email_verified_at' => 'datetime', 'password' => 'hashed'];
+    protected $casts = ['password' => 'hashed'];
 
     // Tus relaciones existentes
     public function movements(): HasMany

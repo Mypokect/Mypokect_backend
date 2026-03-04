@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Validator;
 class GoalContributionController extends Controller
 {
     use ApiResponse;
+
     /**
      * Get all contributions for a specific goal.
      * GET /api/goal-contributions/{goalId}

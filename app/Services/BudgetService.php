@@ -20,9 +20,11 @@ class BudgetService
     /**
      * Create a manual budget with categories.
      *
-     * @param User $user
-     * @param array $data
-     * @return Budget
+     * Multiple active budgets are allowed. The budget analysis uses the date_from/date_to
+     * period to determine which movements to include.
+     *
+     * @param  User  $user
+     * @param  array  $data  ['status' => 'active|pending|archived', 'date_from' => date, 'date_to' => date, ...]
      * @throws \InvalidArgumentException
      */
     public function createManualBudget(User $user, array $data): Budget
@@ -31,16 +33,19 @@ class BudgetService
             $totalAmount = (float) $data['total_amount'];
             $categories = $data['categories'];
 
-            // Validate sum
+            // Validate sum (tolerance: 1.0 — matches frontend's isBalanced check)
             $categoriesSum = array_sum(array_column($categories, 'amount'));
             Log::info("BudgetService: Math Check - Total: $totalAmount, Sum: $categoriesSum");
 
-            if (abs($categoriesSum - $totalAmount) > 0.01) {
+            if (abs($categoriesSum - $totalAmount) > 1.0) {
                 Log::error("BudgetService: Math mismatch. Sum ($categoriesSum) != Total ($totalAmount)");
                 throw new \InvalidArgumentException("Sum of categories (\$$categoriesSum) does not match total amount (\$$totalAmount)");
             }
 
-            // Create budget
+            // Determine status (default: active for backwards compatibility)
+            $status = $data['status'] ?? 'active';
+
+            // Create budget (múltiples presupuestos activos permitidos - la lógica de periodo maneja cuál usar)
             $budget = Budget::create([
                 'user_id' => $user->id,
                 'title' => $data['title'],
@@ -51,7 +56,10 @@ class BudgetService
                     $data['title'].' '.($data['description'] ?? '')
                 ),
                 'plan_type' => $this->aiService->classifyPlanType($data['description'] ?? ''),
-                'status' => 'draft',
+                'status' => $status,
+                'period' => $data['period'] ?? 'monthly',
+                'date_from' => $data['date_from'] ?? null,
+                'date_to' => $data['date_to'] ?? null,
             ]);
 
             Log::info("BudgetService: Budget created with ID: {$budget->id}");
@@ -69,9 +77,11 @@ class BudgetService
     /**
      * Create an AI-generated budget.
      *
-     * @param User $user
-     * @param array $data
-     * @return Budget
+     * Multiple active budgets are allowed. The budget analysis uses the date_from/date_to
+     * period to determine which movements to include.
+     *
+     * @param  User  $user
+     * @param  array  $data  ['status' => 'active|pending|archived', 'date_from' => date, 'date_to' => date, ...]
      * @throws \InvalidArgumentException
      */
     public function createAIBudget(User $user, array $data): Budget
@@ -80,13 +90,17 @@ class BudgetService
             $totalAmount = (float) $data['total_amount'];
             $categories = $data['categories'];
 
-            // Validate sum
+            // Validate sum (tolerance: 1.0 — matches frontend's isBalanced check)
             $categoriesSum = array_sum(array_column($categories, 'amount'));
-            if (abs($categoriesSum - $totalAmount) > 0.01) {
+            if (abs($categoriesSum - $totalAmount) > 1.0) {
                 Log::error("BudgetService: Save AI Math mismatch. Sum: $categoriesSum, Total: $totalAmount");
                 throw new \InvalidArgumentException('Sum of categories does not match total amount');
             }
 
+            // Determine status (default: active for backwards compatibility)
+            $status = $data['status'] ?? 'active';
+
+            // Create budget (múltiples presupuestos activos permitidos - la lógica de periodo maneja cuál usar)
             $budget = Budget::create([
                 'user_id' => $user->id,
                 'title' => $data['title'],
@@ -95,7 +109,10 @@ class BudgetService
                 'mode' => 'ai',
                 'language' => $data['language'] ?? 'es',
                 'plan_type' => $data['plan_type'] ?? 'other',
-                'status' => 'draft',
+                'status' => $status,
+                'period' => $data['period'] ?? 'monthly',
+                'date_from' => $data['date_from'] ?? null,
+                'date_to' => $data['date_to'] ?? null,
             ]);
 
             Log::info("BudgetService: AI Budget saved ID: {$budget->id}");
@@ -112,9 +129,6 @@ class BudgetService
     /**
      * Update budget and its categories.
      *
-     * @param Budget $budget
-     * @param array $data
-     * @return Budget
      * @throws \InvalidArgumentException
      */
     public function updateBudget(Budget $budget, array $data): Budget
@@ -122,9 +136,9 @@ class BudgetService
         $totalAmount = (float) $data['total_amount'];
         $categoriesInput = $data['categories'];
 
-        // Validate sum
+        // Validate sum (tolerance: 1.0 — matches frontend's isBalanced check)
         $categoriesSum = array_sum(array_column($categoriesInput, 'amount'));
-        if (abs($categoriesSum - $totalAmount) > 0.1) {
+        if (abs($categoriesSum - $totalAmount) > 1.0) {
             throw new \InvalidArgumentException("La suma de categorías ($categoriesSum) no coincide con el total ($totalAmount).");
         }
 
@@ -133,6 +147,9 @@ class BudgetService
             'title' => $data['title'],
             'description' => $data['description'] ?? null,
             'total_amount' => $totalAmount,
+            'period' => $data['period'] ?? $budget->period,
+            'date_from' => $data['date_from'] ?? $budget->date_from,
+            'date_to' => $data['date_to'] ?? $budget->date_to,
         ]);
 
         // Sync categories
@@ -146,9 +163,6 @@ class BudgetService
     /**
      * Add a category to an existing budget.
      *
-     * @param Budget $budget
-     * @param array $data
-     * @return BudgetCategory
      * @throws \InvalidArgumentException
      */
     public function addCategory(Budget $budget, array $data): BudgetCategory
@@ -162,12 +176,17 @@ class BudgetService
             throw new \InvalidArgumentException("Adding \$$amount would exceed total budget. Current sum: \$$currentSum, Total: \$".$budget->total_amount);
         }
 
+        $linkedTags = $data['linked_tags'] ?? [];
+        $enrichedLinkedTags = $this->enrichLinkedTagsWithKeywords($budget, $data['name'], $linkedTags);
+
         $category = BudgetCategory::create([
             'budget_id' => $budget->id,
             'name' => $data['name'],
             'amount' => $amount,
             'percentage' => round(($amount / $budget->total_amount) * 100, 2),
             'reason' => $data['reason'] ?? '',
+            'linked_tags' => $enrichedLinkedTags,
+            'linked_tags_since' => null, // Ya no restringimos por timestamp
             'order' => $budget->categories()->count(),
         ]);
 
@@ -176,9 +195,6 @@ class BudgetService
 
     /**
      * Delete budget and all its categories.
-     *
-     * @param Budget $budget
-     * @return void
      */
     public function deleteBudget(Budget $budget): void
     {
@@ -189,22 +205,22 @@ class BudgetService
 
     /**
      * Create categories for a budget.
-     *
-     * @param Budget $budget
-     * @param array $categories
-     * @param float $totalAmount
-     * @return void
      */
     private function createCategories(Budget $budget, array $categories, float $totalAmount): void
     {
         foreach ($categories as $index => $category) {
             $amount = (float) $category['amount'];
+            $linkedTags = $category['linked_tags'] ?? [];
+            $enrichedLinkedTags = $this->enrichLinkedTagsWithKeywords($budget, $category['name'], $linkedTags);
+
             BudgetCategory::create([
                 'budget_id' => $budget->id,
                 'name' => $category['name'],
                 'amount' => $amount,
                 'percentage' => round(($amount / $totalAmount) * 100, 2),
                 'reason' => $category['reason'] ?? '',
+                'linked_tags' => $enrichedLinkedTags,
+                'linked_tags_since' => null, // Ya no restringimos por timestamp
                 'order' => $index,
             ]);
         }
@@ -212,11 +228,6 @@ class BudgetService
 
     /**
      * Sync categories with budget (update, delete, create).
-     *
-     * @param Budget $budget
-     * @param array $categoriesInput
-     * @param float $totalAmount
-     * @return void
      */
     private function syncCategories(Budget $budget, array $categoriesInput, float $totalAmount): void
     {
@@ -231,6 +242,9 @@ class BudgetService
             $amount = (float) $catData['amount'];
             $pct = round(($amount / $totalAmount) * 100, 2);
 
+            $newLinkedTags = $catData['linked_tags'] ?? [];
+            $enrichedLinkedTags = $this->enrichLinkedTagsWithKeywords($budget, $catData['name'], $newLinkedTags);
+
             if (isset($catData['id']) && $catData['id']) {
                 // Update existing
                 $category = BudgetCategory::find($catData['id']);
@@ -240,6 +254,8 @@ class BudgetService
                         'amount' => $amount,
                         'percentage' => $pct,
                         'reason' => $catData['reason'] ?? '',
+                        'linked_tags' => $enrichedLinkedTags,
+                        'linked_tags_since' => null, // Ya no restringimos por timestamp
                         'order' => $index,
                     ]);
                 }
@@ -251,9 +267,66 @@ class BudgetService
                     'amount' => $amount,
                     'percentage' => $pct,
                     'reason' => $catData['reason'] ?? '',
+                    'linked_tags' => $enrichedLinkedTags,
+                    'linked_tags_since' => null, // Ya no restringimos por timestamp
                     'order' => $index,
                 ]);
             }
         }
     }
+
+    /**
+     * Enrich linked_tags with keywords from cached AI suggestions.
+     * Converts simple array ["Servicio"] to rich format {"tags": ["Servicio"], "keywords": ["hotel", ...]}.
+     *
+     * @param  Budget  $budget
+     * @param  string  $categoryName
+     * @param  array|mixed  $linkedTags  Simple array of tag names from frontend
+     * @return array|mixed  Rich format with tags and keywords if AI data available, otherwise original
+     */
+    public function enrichLinkedTagsWithKeywords(Budget $budget, string $categoryName, $linkedTags)
+    {
+        // If linked_tags is empty or not an array, return as-is
+        if (empty($linkedTags) || !is_array($linkedTags)) {
+            return $linkedTags;
+        }
+
+        // If already in rich format (has 'tags' and 'keywords' keys), return as-is
+        if (isset($linkedTags['tags']) && is_array($linkedTags['tags'])) {
+            return $linkedTags;
+        }
+
+        // Check if budget has cached AI suggestions
+        $cache = $budget->suggested_tags_cache;
+        if (empty($cache) || !isset($cache['matches_detailed'])) {
+            // No AI suggestions available, return simple format as-is
+            return $linkedTags;
+        }
+
+        $matchesDetailed = $cache['matches_detailed'];
+
+        // Check if this category has AI suggestions with keywords
+        if (isset($matchesDetailed[$categoryName])) {
+            $aiData = $matchesDetailed[$categoryName];
+
+            // If AI data has keywords, use the rich format
+            if (isset($aiData['keywords']) && !empty($aiData['keywords'])) {
+                Log::info("Enriching linked_tags for category '{$categoryName}' with AI keywords", [
+                    'budget_id' => $budget->id,
+                    'original_tags' => $linkedTags,
+                    'ai_tags' => $aiData['tags'] ?? [],
+                    'ai_keywords' => $aiData['keywords'],
+                ]);
+
+                return [
+                    'tags' => $linkedTags, // Use tags from frontend (user's selection)
+                    'keywords' => $aiData['keywords'], // Add keywords from AI analysis
+                ];
+            }
+        }
+
+        // No AI keywords found for this category, return simple format
+        return $linkedTags;
+    }
+
 }
