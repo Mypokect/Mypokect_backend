@@ -13,6 +13,11 @@ class TaxController extends Controller
 {
     use ApiResponse;
 
+    /**
+     * Get tax data.
+     *
+     * Returns income, deductible expenses (health, housing), withholdings, and cash payment alerts for Colombian tax purposes.
+     */
     public function getData(): JsonResponse
     {
         $user = Auth::user();
@@ -88,7 +93,9 @@ class TaxController extends Controller
     }
 
     /**
-     * RADAR DE ALERTAS
+     * Check tax limits (radar).
+     *
+     * Compares user's income/expenses against 2026 Colombian tax thresholds (UVT-based) and returns alert status per category.
      */
     public function checkLimits(Request $request): JsonResponse
     {

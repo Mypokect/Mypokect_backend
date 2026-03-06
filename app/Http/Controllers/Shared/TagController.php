@@ -26,8 +26,11 @@ class TagController extends Controller
     }
 
     /**
-     * Get all tags for the authenticated user.
-     * Optional filter: ?type=expense|income (only tags used in movements of that type)
+     * List all tags.
+     *
+     * Returns user's tags, optionally filtered by movement type.
+     *
+     * @queryParam type string optional Filter by movement type: expense or income. Example: expense
      */
     public function index(Request $request): JsonResponse
     {
@@ -54,7 +57,9 @@ class TagController extends Controller
     }
 
     /**
-     * Create a new tag.
+     * Create a tag.
+     *
+     * Creates or retrieves an existing tag by name (case-insensitive, auto-capitalized).
      */
     public function store(CreateTagRequest $request): JsonResponse
     {
@@ -82,8 +87,9 @@ class TagController extends Controller
     }
 
     /**
-     * Suggest tag based on description and amount using AI.
-     * This endpoint does NOT save to database, only returns suggestion.
+     * Suggest a tag with AI.
+     *
+     * Uses AI to suggest the best tag name for a movement based on its description and amount. Does not save.
      */
     public function suggest(TagSuggestionRequest $request): JsonResponse
     {

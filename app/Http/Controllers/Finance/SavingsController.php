@@ -9,6 +9,11 @@ use Illuminate\Support\Facades\Http;
 
 class SavingsController extends Controller
 {
+    /**
+     * Analyze savings capacity.
+     *
+     * Calculates monthly/weekly savings capacity using the 50/30/20 rule, plus an AI-generated coaching insight.
+     */
     public function analyze()
     {
         try {

@@ -15,7 +15,13 @@ class AuthController extends Controller
     use ApiResponse;
 
     /**
-     * Handle user login
+     * Login.
+     *
+     * Authenticates user with phone number and 4-digit PIN. Returns a Sanctum bearer token.
+     *
+     * @bodyParam phone string required User's phone number. Example: 3001234567
+     * @bodyParam password string required 4-digit PIN. Example: 1234
+     * @unauthenticated
      */
     public function login(Request $request): JsonResponse
     {
@@ -52,7 +58,15 @@ class AuthController extends Controller
     }
 
     /**
-     * Handle user registration
+     * Register.
+     *
+     * Creates a new user account and returns a Sanctum bearer token.
+     *
+     * @bodyParam name string required User's display name. Example: Carlos
+     * @bodyParam phone string required Phone number (unique). Example: 3001234567
+     * @bodyParam country_code string required Country dial code. Example: +57
+     * @bodyParam password string required 4-digit PIN. Example: 1234
+     * @unauthenticated
      */
     public function register(Request $request): JsonResponse
     {
@@ -87,6 +101,11 @@ class AuthController extends Controller
         }
     }
 
+    /**
+     * Get home data.
+     *
+     * Returns the user's name, current balance, and financial status indicator (color + label).
+     */
     public function homeData(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -126,8 +145,9 @@ class AuthController extends Controller
     }
 
     /**
-     * Obtener resumen financiero detallado del mes actual
-     * Retorna: ingresos, gastos, aportes a metas y etiquetas más frecuentes
+     * Get financial summary.
+     *
+     * Returns current month's income, expenses, goal contributions, and top 5 tags by amount.
      */
     public function financialSummary(Request $request): JsonResponse
     {

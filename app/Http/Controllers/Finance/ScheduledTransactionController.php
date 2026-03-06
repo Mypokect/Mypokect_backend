@@ -17,8 +17,12 @@ class ScheduledTransactionController extends Controller
     use ApiResponse;
 
     /**
-     * Devuelve todas las ocurrencias de transacciones para un mes/año,
-     * con el estado de pago ('is_paid') verificado correctamente.
+     * List scheduled transaction occurrences.
+     *
+     * Returns all calculated occurrences for a given month/year with paid status.
+     *
+     * @queryParam month int required Month number (1-12). Example: 3
+     * @queryParam year int required Year. Example: 2026
      */
     public function index(Request $request): JsonResponse
     {
@@ -107,6 +111,19 @@ class ScheduledTransactionController extends Controller
         return $this->successResponse($occurrencesResult);
     }
 
+    /**
+     * Create a scheduled transaction.
+     *
+     * @bodyParam title string required Transaction title. Example: Arriendo
+     * @bodyParam amount number required Amount. Example: 1200000
+     * @bodyParam type string required Type: expense or income. Example: expense
+     * @bodyParam category string optional Category label. Example: Vivienda
+     * @bodyParam start_date string required Start date (Y-m-d). Example: 2026-03-01
+     * @bodyParam recurrence_type string required Recurrence: none, daily, weekly, monthly, yearly. Example: monthly
+     * @bodyParam recurrence_interval int optional Interval (required if not none). Example: 1
+     * @bodyParam end_date string optional End date (Y-m-d). Example: 2026-12-31
+     * @bodyParam reminder_days_before int optional Days before to remind. Example: 3
+     */
     public function store(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -126,6 +143,14 @@ class ScheduledTransactionController extends Controller
         return $this->createdResponse($transaction);
     }
 
+    /**
+     * Toggle paid status for an occurrence.
+     *
+     * Marks or unmarks a specific date's occurrence as paid.
+     *
+     * @bodyParam date string required Occurrence date (Y-m-d). Example: 2026-03-15
+     * @bodyParam is_paid boolean required Whether it's paid. Example: true
+     */
     public function togglePaidStatus(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
@@ -148,6 +173,9 @@ class ScheduledTransactionController extends Controller
         return $this->successResponse($occurrence);
     }
 
+    /**
+     * Get a scheduled transaction.
+     */
     public function show(ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
@@ -155,10 +183,16 @@ class ScheduledTransactionController extends Controller
         return $this->successResponse($scheduledTransaction);
     }
 
+    /**
+     * Update a scheduled transaction.
+     */
     public function update(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
     { /* ... lógica de actualización ... */
     }
 
+    /**
+     * Delete a scheduled transaction.
+     */
     public function destroy(ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);

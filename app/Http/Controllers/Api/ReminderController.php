@@ -21,10 +21,13 @@ class ReminderController extends Controller
     ) {}
 
     /**
-     * Display a listing of reminders within a date range.
-     * 
-     * @param Request $request
-     * @return ReminderCollection
+     * List reminders in a date range.
+     *
+     * Returns reminders within the given range, expanding monthly recurring ones into individual occurrences.
+     *
+     * @queryParam start string required Start date. Example: 2026-03-01
+     * @queryParam end string required End date. Example: 2026-03-31
+     * @queryParam status string optional Filter: pending, paid, all. Example: all
      */
     public function index(Request $request): ReminderCollection
     {
@@ -81,10 +84,9 @@ class ReminderController extends Controller
     }
 
     /**
-     * Store a newly created reminder.
-     * 
-     * @param StoreReminderRequest $request
-     * @return JsonResponse
+     * Create a reminder.
+     *
+     * Creates a payment/bill reminder. Due date is converted to UTC using the provided timezone.
      */
     public function store(StoreReminderRequest $request): JsonResponse
     {
@@ -106,10 +108,7 @@ class ReminderController extends Controller
     }
 
     /**
-     * Display the specified reminder.
-     * 
-     * @param Reminder $reminder
-     * @return ReminderResource
+     * Get a reminder.
      */
     public function show(Reminder $reminder): ReminderResource
     {
@@ -119,11 +118,7 @@ class ReminderController extends Controller
     }
 
     /**
-     * Update the specified reminder.
-     * 
-     * @param UpdateReminderRequest $request
-     * @param Reminder $reminder
-     * @return JsonResponse
+     * Update a reminder.
      */
     public function update(UpdateReminderRequest $request, Reminder $reminder): JsonResponse
     {
@@ -147,10 +142,7 @@ class ReminderController extends Controller
     }
 
     /**
-     * Remove the specified reminder.
-     * 
-     * @param Reminder $reminder
-     * @return JsonResponse
+     * Delete a reminder.
      */
     public function destroy(Reminder $reminder): JsonResponse
     {
@@ -165,10 +157,12 @@ class ReminderController extends Controller
 
     /**
      * Mark a reminder as paid.
-     * 
-     * @param Request $request
-     * @param Reminder $reminder
-     * @return JsonResponse
+     *
+     * Optionally creates a payment record with the amount and note.
+     *
+     * @bodyParam occurrence_date string optional Date of the occurrence. Example: 2026-03-15
+     * @bodyParam amount_paid number optional Amount paid. Example: 150000
+     * @bodyParam note string optional Payment note. Example: Pagado por transferencia
      */
     public function markAsPaid(Request $request, Reminder $reminder): JsonResponse
     {

@@ -36,9 +36,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Get all budgets for the authenticated user.
-     * Auto-archiva presupuestos cuya fecha de fin ya pasó (status → archived).
-     * Los archivados se devuelven igual, el frontend decide cómo mostrarlos.
+     * List all budgets.
+     *
+     * Auto-archives expired budgets and returns all with spent amounts per category.
      */
     public function getBudgets(Request $request): JsonResponse
     {
@@ -109,8 +109,11 @@ class BudgetController extends Controller
     }
 
     /**
-     * Reactivar un presupuesto archivado.
-     * Extiende la fecha de fin para cubrir el período actual y cambia el status a 'active'.
+     * Reactivate an archived budget.
+     *
+     * Sets status back to active and extends date_to.
+     *
+     * @bodyParam date_to string required New end date (>= today). Example: 2026-04-01
      */
     public function reactivateBudget(Request $request, Budget $budget): JsonResponse
     {
@@ -154,8 +157,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Duplicar un presupuesto para el periodo actual.
-     * Crea una copia con las mismas categorías, gastos en $0, status 'active'.
+     * Duplicate a budget.
+     *
+     * Creates a copy with the same categories, zero spending, and status active for the current period.
      */
     public function duplicateBudget(Budget $budget): JsonResponse
     {
@@ -208,7 +212,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Get a specific budget with all its categories.
+     * Get a single budget.
+     *
+     * Returns the budget with its categories, validation status, and categories total.
      */
     public function getBudget(Budget $budget): JsonResponse
     {
@@ -236,7 +242,21 @@ class BudgetController extends Controller
     }
 
     /**
-     * Create a manual budget (MODO 1: MANUAL).
+     * Create a manual budget.
+     *
+     * Creates a budget with user-defined categories. Sum of category amounts must equal total_amount.
+     *
+     * @bodyParam title string required Budget name. Example: Viaje a Cartagena
+     * @bodyParam total_amount number required Total budget amount. Example: 500000
+     * @bodyParam description string optional Budget description. Example: Viaje de fin de semana
+     * @bodyParam date_from string optional Start date. Example: 2026-03-01
+     * @bodyParam date_to string optional End date. Example: 2026-03-15
+     * @bodyParam period string optional Period type: weekly, biweekly, monthly, custom. Example: biweekly
+     * @bodyParam status string optional Budget status: active, pending, archived. Example: active
+     * @bodyParam categories array required List of categories.
+     * @bodyParam categories[].name string required Category name. Example: Hospedaje
+     * @bodyParam categories[].amount number required Category amount. Example: 200000
+     * @bodyParam categories[].reason string optional Category reason. Example: Hotel 3 noches
      */
     public function createManualBudget(Request $request): JsonResponse
     {
@@ -285,7 +305,13 @@ class BudgetController extends Controller
     }
 
     /**
-     * Generate budget with AI suggestions (MODO 2: IA).
+     * Generate AI budget suggestions.
+     *
+     * Uses Groq AI to generate category distribution. Returns suggestions to review before saving.
+     *
+     * @bodyParam title string required Budget title. Example: Viaje a Medellín
+     * @bodyParam description string required Context for AI. Example: Viaje de 5 días con mi pareja
+     * @bodyParam total_amount number required Total amount. Example: 1000000
      */
     public function generateAIBudget(Request $request): JsonResponse
     {
@@ -341,7 +367,19 @@ class BudgetController extends Controller
     }
 
     /**
-     * Save an AI-generated budget (user confirms after reviewing).
+     * Save an AI-generated budget.
+     *
+     * Persists the AI suggestions after user review and confirmation.
+     *
+     * @bodyParam title string required Budget title. Example: Viaje a Medellín
+     * @bodyParam total_amount number required Total amount. Example: 1000000
+     * @bodyParam description string optional Description. Example: Viaje de 5 días
+     * @bodyParam date_from string optional Start date. Example: 2026-03-10
+     * @bodyParam date_to string optional End date. Example: 2026-03-15
+     * @bodyParam categories array required AI-generated categories.
+     * @bodyParam categories[].name string required Category name. Example: Hospedaje
+     * @bodyParam categories[].amount number required Category amount. Example: 400000
+     * @bodyParam categories[].reason string optional Reason. Example: Hotel céntrico
      */
     public function saveAIBudget(Request $request): JsonResponse
     {
@@ -393,6 +431,15 @@ class BudgetController extends Controller
 
     /**
      * Update a budget.
+     *
+     * Updates budget details and replaces categories. Invalidates AI suggestions cache.
+     *
+     * @bodyParam title string required Budget title. Example: Viaje actualizado
+     * @bodyParam total_amount number required Total amount. Example: 600000
+     * @bodyParam categories array required Updated categories list.
+     * @bodyParam categories[].id int optional Existing category ID to update.
+     * @bodyParam categories[].name string required Category name. Example: Transporte
+     * @bodyParam categories[].amount number required Category amount. Example: 150000
      */
     public function updateBudget(Request $request, Budget $budget): JsonResponse
     {
@@ -448,7 +495,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Delete a budget and all its categories.
+     * Delete a budget.
+     *
+     * Soft-deletes the budget and all its categories.
      */
     public function deleteBudget(Budget $budget): JsonResponse
     {
@@ -469,7 +518,11 @@ class BudgetController extends Controller
     }
 
     /**
-     * Add a category to an existing budget.
+     * Add a category to a budget.
+     *
+     * @bodyParam name string required Category name. Example: Entretenimiento
+     * @bodyParam amount number required Category amount. Example: 100000
+     * @bodyParam reason string optional Reason. Example: Actividades turísticas
      */
     public function addCategory(Request $request, Budget $budget): JsonResponse
     {
@@ -504,7 +557,11 @@ class BudgetController extends Controller
     }
 
     /**
-     * Procesa texto de voz para extraer categoría y monto.
+     * Process voice command for budget creation.
+     *
+     * Extracts category name and amount from natural language text using AI.
+     *
+     * @bodyParam text string required Voice transcription. Example: Hotel 200 mil
      */
     public function processVoiceCommand(Request $request): JsonResponse
     {
@@ -524,8 +581,12 @@ class BudgetController extends Controller
     }
 
     /**
-     * Get real spending per budget category based on linked_tags.
-     * Each tag maps to one category (first wins). Single query for all movements.
+     * Get spending per category.
+     *
+     * Calculates real spending per budget category based on linked tags and movement overrides.
+     *
+     * @queryParam from string optional Start date (defaults to budget's date_from). Example: 2026-03-01
+     * @queryParam to string optional End date (defaults to budget's date_to). Example: 2026-03-15
      */
     public function getSpending(Request $request, Budget $budget): JsonResponse
     {
@@ -767,7 +828,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Validate a budget (check if categories sum matches total).
+     * Validate a budget.
+     *
+     * Checks if the sum of all category amounts matches the budget's total_amount.
      */
     public function validateBudget(Budget $budget): JsonResponse
     {
@@ -795,7 +858,11 @@ class BudgetController extends Controller
     }
 
     /**
-     * Update a single category within a budget.
+     * Update a budget category.
+     *
+     * @bodyParam name string optional New category name. Example: Alimentación
+     * @bodyParam amount number optional New amount. Example: 250000
+     * @bodyParam reason string optional New reason. Example: Comidas y snacks
      */
     public function updateCategory(Request $request, Budget $budget, BudgetCategory $category): JsonResponse
     {
@@ -827,7 +894,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Delete a category from a budget.
+     * Delete a budget category.
+     *
+     * Removes a single category from the budget.
      */
     public function deleteCategory(Budget $budget, BudgetCategory $category): JsonResponse
     {
@@ -849,14 +918,13 @@ class BudgetController extends Controller
     }
 
     /**
-     * Get AI-suggested tag-to-category matches for a budget's period.
+     * Get AI-suggested tag assignments.
      *
-     * SISTEMA DE CACHÉ POR HASH:
-     * - Calcula un hash MD5 de los tags+totales+conteo+período actual
-     * - Si el hash coincide con el guardado en BD → devuelve el caché (0 tokens Groq)
-     * - Si el hash difiere (nuevos gastos) → llama a Groq, guarda resultado+hash en BD
+     * Returns AI-suggested tag-to-category matches. Uses MD5-based cache to avoid redundant Groq calls.
      *
-     * Esto garantiza que la IA solo se llama cuando los datos realmente cambiaron.
+     * @queryParam from string optional Start date. Example: 2026-03-01
+     * @queryParam to string optional End date. Example: 2026-03-15
+     * @queryParam force_refresh boolean optional Force fresh AI analysis ignoring cache. Example: false
      */
     public function getSuggestedTags(Request $request, Budget $budget): JsonResponse
     {
@@ -1046,7 +1114,9 @@ class BudgetController extends Controller
     }
 
     /**
-     * Clear the AI suggestions cache for a budget (force fresh analysis)
+     * Clear AI suggestions cache.
+     *
+     * Removes cached tag suggestions so the next request performs a fresh AI analysis.
      */
     public function clearSuggestedTagsCache(Request $request, Budget $budget): JsonResponse
     {
@@ -1075,10 +1145,11 @@ class BudgetController extends Controller
     }
 
     /**
-     * Auto-apply AI-suggested tags to budget categories.
-     * Saves linked_tags (with keywords) to DB without invalidating AI cache.
+     * Apply AI-suggested tags to categories.
      *
-     * Expects JSON body: { "category_tags": { "Servicio hotel": ["Servicio"], "Comida en viaje": ["Comida"] } }
+     * Saves linked_tags to each category. Does not invalidate the AI suggestions cache.
+     *
+     * @bodyParam category_tags object required Map of category name to tag names array. Example: {"Hospedaje": ["Hotel"], "Comida": ["Restaurante"]}
      */
     public function applyAITags(Request $request, Budget $budget): JsonResponse
     {
@@ -1223,9 +1294,12 @@ class BudgetController extends Controller
     }
 
     /**
-     * Move a single movement to a different category (manual override).
-     * POST /budgets/{budget}/move-movement
-     * Body: { movement_id: int, to_category: string }
+     * Move a movement to a different category.
+     *
+     * Stores a per-movement override so the movement appears under the target category in spending reports.
+     *
+     * @bodyParam movement_id int required The movement ID to reassign. Example: 42
+     * @bodyParam to_category string required Target category name. Example: Transporte
      */
     public function moveMovement(Request $request, Budget $budget): JsonResponse
     {

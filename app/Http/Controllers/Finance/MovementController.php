@@ -27,7 +27,9 @@ class MovementController extends Controller
     }
 
     /**
-     * Get all movements for the authenticated user.
+     * List all movements.
+     *
+     * Returns all movements for the authenticated user, ordered by most recent, with their associated tag.
      */
     public function index(): JsonResponse
     {
@@ -50,7 +52,9 @@ class MovementController extends Controller
     }
 
     /**
-     * Create a new movement.
+     * Create a movement.
+     *
+     * Creates an income or expense movement. Automatically finds or creates the tag by name.
      */
     public function store(CreateMovementRequest $request): JsonResponse
     {
@@ -100,7 +104,9 @@ class MovementController extends Controller
     }
 
     /**
-     * Suggest movement data from voice transcription using AI.
+     * Suggest movement from voice.
+     *
+     * Uses AI to parse a voice transcription and suggest movement fields (amount, tag, type, description).
      */
     public function suggestFromVoice(VoiceSuggestionRequest $request): JsonResponse
     {

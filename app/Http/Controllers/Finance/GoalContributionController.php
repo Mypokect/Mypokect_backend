@@ -18,8 +18,9 @@ class GoalContributionController extends Controller
     use ApiResponse;
 
     /**
-     * Get all contributions for a specific goal.
-     * GET /api/goal-contributions/{goalId}
+     * List contributions for a goal.
+     *
+     * Returns all contributions ordered by date (oldest first).
      */
     public function index(string $goalId): JsonResponse
     {
@@ -61,8 +62,13 @@ class GoalContributionController extends Controller
     }
 
     /**
-     * Create a new contribution to a goal.
-     * POST /api/goal-contributions
+     * Create a contribution.
+     *
+     * Adds an amount to a saving goal.
+     *
+     * @bodyParam goal_id int required The saving goal ID. Example: 1
+     * @bodyParam amount number required Contribution amount. Example: 50000
+     * @bodyParam description string optional Note. Example: Ahorro quincenal
      */
     public function store(Request $request): JsonResponse
     {
@@ -125,7 +131,8 @@ class GoalContributionController extends Controller
 
     /**
      * Delete a contribution.
-     * DELETE /api/goal-contributions/{contributionId}
+     *
+     * Removes a contribution from a goal and adjusts the saved amount.
      */
     public function destroy(string $contributionId): JsonResponse
     {
@@ -163,8 +170,9 @@ class GoalContributionController extends Controller
     }
 
     /**
-     * Get statistics for a goal's contributions.
-     * GET /api/goal-contributions/{goalId}/stats
+     * Get contribution statistics.
+     *
+     * Returns aggregate stats: total, average, largest, smallest, percentage of goal, and last contribution date.
      */
     public function stats(string $goalId): JsonResponse
     {

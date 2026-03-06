@@ -11,10 +11,9 @@ use Illuminate\Http\Request;
 class NotificationTokenController extends Controller
 {
     /**
-     * Register a new FCM token for push notifications.
-     * 
-     * @param RegisterTokenRequest $request
-     * @return JsonResponse
+     * Register an FCM token.
+     *
+     * Stores a Firebase Cloud Messaging token for push notifications. Replaces existing token if duplicate.
      */
     public function register(RegisterTokenRequest $request): JsonResponse
     {
@@ -34,10 +33,8 @@ class NotificationTokenController extends Controller
 
     /**
      * Unregister an FCM token.
-     * 
-     * @param Request $request
-     * @param string $token
-     * @return JsonResponse
+     *
+     * Removes the specified token for the authenticated user.
      */
     public function unregister(Request $request, string $token): JsonResponse
     {
@@ -51,10 +48,9 @@ class NotificationTokenController extends Controller
     }
 
     /**
-     * Get all registered tokens for the authenticated user.
-     * 
-     * @param Request $request
-     * @return JsonResponse
+     * List FCM tokens.
+     *
+     * Returns all registered push notification tokens for the authenticated user.
      */
     public function index(Request $request): JsonResponse
     {

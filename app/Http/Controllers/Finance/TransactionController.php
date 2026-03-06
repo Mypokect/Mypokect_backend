@@ -13,16 +13,16 @@ use Illuminate\Support\Facades\Log;
 class TransactionController extends Controller
 {
     /**
-     * Get unified view of all transactions (movements + goal contributions).
-     * GET /api/transactions/unified
+     * Get unified transactions.
      *
-     * Query parameters:
-     * - type: expense,income,contribution (comma-separated)
-     * - start_date: YYYY-MM-DD
-     * - end_date: YYYY-MM-DD
-     * - goal_id: Filter by specific goal
-     * - page: 1 (default)
-     * - per_page: 50 (default, configurable: 10, 50, 100)
+     * Combines movements and goal contributions into a single paginated timeline.
+     *
+     * @queryParam type string optional Comma-separated types: expense, income, contribution. Example: expense,income
+     * @queryParam start_date string optional Start date (Y-m-d). Example: 2026-03-01
+     * @queryParam end_date string optional End date (Y-m-d). Example: 2026-03-31
+     * @queryParam goal_id int optional Filter contributions by goal ID. Example: 5
+     * @queryParam page int optional Page number. Example: 1
+     * @queryParam per_page int optional Items per page (10, 50, 100). Example: 50
      */
     public function unified(Request $request): JsonResponse
     {

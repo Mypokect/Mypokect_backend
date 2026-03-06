@@ -14,6 +14,11 @@ class SavingGoalController extends Controller
 {
     use ApiResponse;
 
+    /**
+     * List all saving goals.
+     *
+     * Returns goals with calculated saved_amount and percentage from contributions.
+     */
     public function index(): JsonResponse
     {
         try {
@@ -44,6 +49,15 @@ class SavingGoalController extends Controller
         }
     }
 
+    /**
+     * Create a saving goal.
+     *
+     * @bodyParam name string required Goal name. Example: Viaje a Europa
+     * @bodyParam target_amount number required Target amount. Example: 5000000
+     * @bodyParam deadline string optional Target date. Example: 2026-12-31
+     * @bodyParam color string optional Hex color. Example: #3B82F6
+     * @bodyParam emoji string optional Emoji icon. Example: ✈️
+     */
     public function store(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
@@ -84,6 +98,11 @@ class SavingGoalController extends Controller
         }
     }
 
+    /**
+     * Get a saving goal.
+     *
+     * Returns a single goal with saved_amount and percentage calculated from contributions.
+     */
     public function show(string $id): JsonResponse
     {
         try {
@@ -111,6 +130,16 @@ class SavingGoalController extends Controller
         }
     }
 
+    /**
+     * Update a saving goal.
+     *
+     * @bodyParam name string optional New name. Example: Fondo de emergencia
+     * @bodyParam target_amount number optional New target. Example: 3000000
+     * @bodyParam deadline string optional New deadline. Example: 2026-06-30
+     * @bodyParam color string optional New color. Example: #10B981
+     * @bodyParam emoji string optional New emoji. Example: 🎯
+     * @bodyParam status string optional Goal status. Example: completed
+     */
     public function update(Request $request, string $id): JsonResponse
     {
         $validated = Validator::make($request->all(), [
@@ -177,6 +206,9 @@ class SavingGoalController extends Controller
         }
     }
 
+    /**
+     * Delete a saving goal.
+     */
     public function destroy(string $id): JsonResponse
     {
         try {
