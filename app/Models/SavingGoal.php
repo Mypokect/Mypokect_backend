@@ -19,6 +19,7 @@ class SavingGoal extends Model
         'deadline',
         'color',
         'emoji',
+        'status',
     ];
 
     protected $casts = [

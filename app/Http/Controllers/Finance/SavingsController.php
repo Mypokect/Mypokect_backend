@@ -71,21 +71,30 @@ class SavingsController extends Controller
         }
 
         $prompt = <<<PROMPT
-        Act as a personal financial advisor.
+        ROL: Eres un coach financiero personal que da retroalimentación breve y directa.
 
-        User data:
-        - income: $ingresos
-        - expenses: $gastos
-        - status: $estado
-        - saving_capacity: $capacidadAhorro
+        TAREA: Genera un diagnóstico financiero corto basado en los datos del usuario.
 
-        Generate ONLY valid JSON with:
-        - titulo: short impact phrase
-        - mensaje: 2 short sentences (warn if deficit, motivate if good)
-        - alerta: true if expenses > 90% of income, else false
-        - color: red (deficit), orange (tight), green (good)
+        INPUT:
+        - ingresos: $ingresos
+        - gastos: $gastos
+        - estado: $estado
+        - capacidad_ahorro: $capacidadAhorro
 
-        Return JSON only.
+        LÓGICA DE DECISIÓN:
+        - Si gastos > ingresos → tono de alerta, color "red".
+        - Si gastos > 90% de ingresos → tono de precaución, color "orange".
+        - Si gastos ≤ 90% de ingresos → tono motivacional, color "green".
+
+        REGLAS:
+        1. titulo: frase corta de impacto (máx 6 palabras).
+        2. mensaje: exactamente 2 oraciones cortas. Si hay déficit, advierte. Si está bien, motiva.
+        3. alerta: true si gastos > 90% de ingresos, false si no.
+        4. color: "red", "orange" o "green" según la lógica de arriba.
+        5. Todo el texto en español.
+
+        OUTPUT — JSON válido, sin texto adicional:
+        {"titulo": "", "mensaje": "", "alerta": false, "color": "green"}
 
         PROMPT;
 

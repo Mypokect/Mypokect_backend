@@ -297,98 +297,47 @@ class MovementAIService
         ]);
 
         $prompt = <<<PROMPT
-            SYSTEM:
-            Return ONLY valid JSON. Any text outside JSON is an error.
+ROLE: You are a financial transaction extractor. You convert voice transcriptions into structured JSON data.
 
-            TASK:
-            Extract structured transaction data from a voice transcription.
+TASK: Extract exactly one transaction from the transcription below.
 
-            CORE RULES:
-            - Output MUST be valid JSON only
-            - Do NOT explain, comment, or add extra text
-            - Do NOT invent information
-            - Use default values when data is missing
-            - FIRST detect the language from the transcription
-            - ALL output text MUST be in that same language
-            - NEVER mix languages
+RULES:
+- Return JSON only. No explanations, no extra text.
+- Detect the language from the transcription. ALL output text must match that language.
+- Do NOT invent data. Use defaults when information is missing.
 
-            INPUT:
-            Transcription: "$transcription"
-            User tags: [$tagsList]
-            User goals: [$goalsList]
+INPUT:
+Transcription: "$transcription"
+User tags: [$tagsList]
+User goals: [$goalsList]
 
-            LANGUAGE LOGIC:
-            - Detect language ONLY from the transcription
-            - Spanish input → Spanish output
-            - English input → English output
-            - Apply language consistently to:
-            - description
-            - suggested_tag
-            - goal label (if used)
+DECISION LOGIC:
+- Money spent or paid → type: "expense"
+- Money received or earned → type: "income"
+- Goals are ONLY relevant when ALL of these are true: (1) money is NOT spent, (2) explicit saving verbs are present (ahorrar, guardar, apartar, saving), (3) a matching user goal exists. Otherwise IGNORE goals completely.
 
-            TRANSACTION LOGIC:
-            - If money is spent or paid → expense
-            - If money is received → income
-            - If money is spent → IGNORE goals completely
-            - Consider goals ONLY if user explicitly says they are saving money
+FIELD RULES:
 
-            FIELDS DEFINITION:
+amount: numeric only. Convert "k"=1000, "mil"=1000, "millón"=1000000. Default: 0.
 
-            amount:
-            - numeric only
-            - convert k / mil / thousand / million
-            - if unclear → 0
+description: 2-4 word summary of the action. No numbers. Same language as transcription.
 
-            description:
-            - short summary of the action
-            - max 4 words
-            - no numbers, no amounts
-            - same language as transcription
+type: "expense" or "income".
 
-            type:
-            - "income" if money received
-            - otherwise "expense"
+payment_method: "cash" only if explicit cash words (efectivo, billetes, cash). Otherwise "digital".
 
-            payment_method:
-            - "cash" ONLY if words like:
-            - Spanish: efectivo, plata, billetes
-            - English: cash
-            - otherwise "digital"
+suggested_tag:
+- Classify by SERVICE or ACTIVITY type (not by object name).
+- If an existing user tag matches 90%+ semantically → use it exactly.
+- Otherwise return ONE generic category word in the user's language.
+- NEVER use object names (celular, laptop, carro, hotel names).
+- GOAL EXCEPTION: Only if all 3 goal conditions above are met → return "Meta: <nombre>" (ES) or "Goal: <name>" (EN).
 
-            suggested_tag:
-            - DEFAULT BEHAVIOR (most cases):
-            - classify by SERVICE or ACTIVITY
-            - ignore goals
-            - If 90%+ semantic match with existing user tag → use it
-            - Else return ONE generic category word
-            - MUST be in user language
-            - NEVER use object names (celular, phone, carro, laptop, hotel name, etc.)
+has_invoice: true only if invoice words appear (factura, rut, electrónica, invoice). Otherwise false.
 
-            - GOAL BEHAVIOR (RARE, STRICT):
-            - ONLY if ALL are true:
-                1. Money is NOT spent
-                2. Explicit saving verbs present (ahorrar, guardar, apartar, saving)
-                3. Goal matches a user goal
-            - ONLY then return:
-                - Spanish: "Meta: <nombre>"
-                - English: "Goal: <name>"
-
-            has_invoice:
-            - true ONLY if mentioned:
-            - Spanish: factura, rut, electrónica
-            - English: invoice
-            - otherwise false
-
-            OUTPUT (EXACT SCHEMA):
-            {
-            "amount": 0,
-            "description": "",
-            "type": "expense",
-            "payment_method": "digital",
-            "suggested_tag": "",
-            "has_invoice": false
-            }
-        PROMPT;
+OUTPUT:
+{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false}
+PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
 
@@ -413,31 +362,23 @@ class MovementAIService
         $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
 
         $prompt = <<<PROMPT
-            TASK: Categorize the transaction by the REAL TYPE OF EXPENSE.
+ROLE: Transaction categorizer. Assigns one spending category tag.
 
-        STRICT RULES:
-        - Detect the language of the transaction description
-        - The OUTPUT TAG MUST be in the SAME language as the description
-        - If using an existing tag in a different language, TRANSLATE it to the description language
-        - Determine what the money was actually spent on
-        - IGNORE goals, savings, objects, or account names
-        - Classify by service or activity
-        - Return EXACTLY ONE tag
-        - Use an existing tag if semantically appropriate
-        - Otherwise suggest a NEW generic category
-        - Avoid specific objects or product names
-        - ONE word only
-        - No explanations
-        - No punctuation
-        - No extra text
+TASK: Return ONE tag that classifies this transaction by service or activity type.
 
-        Transaction:
-        Description: "$description"
-        Amount: $amount
-        Existing tags: [$tagsList]
+RULES:
+- Output the tag word ONLY. No JSON, no explanation, no punctuation.
+- Tag language must match the description language.
+- Classify by what the money was spent on (service/activity).
+- If an existing tag fits semantically → use it exactly.
+- If none fits → return one new generic category word.
+- NEVER return product names, brand names, or object names.
 
-        Return ONLY the tag.
-        PROMPT;
+INPUT:
+Description: "$description"
+Amount: $amount
+Existing tags: [$tagsList]
+PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
 
@@ -650,67 +591,34 @@ class MovementAIService
         $movementsText = implode("\n", $movementsList);
 
         $prompt = <<<PROMPT
-            TAREA: Clasifica cada movimiento de gasto en la categoría del presupuesto que mejor corresponda.
+ROLE: You are a budget expense classifier. You assign individual movements to budget categories.
 
-            ═══ CATEGORÍAS DEL PRESUPUESTO ═══
-            [$categoriesList]
+TASK: Classify each movement into exactly one budget category. Return JSON only.
 
-            ═══ MOVIMIENTOS DEL USUARIO ═══
-            $movementsText
+INPUT:
+Categories: [$categoriesList]
+Movements:
+$movementsText
 
-            ═══ INSTRUCCIONES ═══
+DECISION LOGIC:
+1. DESCRIPTION has higher priority than TAG name.
+2. If description is empty ("sin descripción") → use the TAG name for semantic matching.
+3. Same TAG can go to DIFFERENT categories if descriptions differ:
+   - [0] Tag:"Servicio" Desc:"hotel marriott" → Hospedaje
+   - [1] Tag:"Servicio" Desc:"taxi centro" → Transporte
+4. If multiple categories could fit → choose the most specific one.
+5. Each movement goes to exactly ONE category.
 
-            Analiza CADA movimiento individualmente:
+RULES:
+- Use EXACT category names (case-sensitive).
+- ALL categories must appear in output (use [] if no movements match).
+- Return JSON only. No explanations.
 
-            1. Lee el TAG y la DESCRIPCIÓN del movimiento
-            2. Determina de qué tipo de gasto se trata
-            3. Asigna el movimiento a la categoría que mejor corresponda
+OUTPUT:
+{"CategoryName": [0, 5, 12], "OtherCategory": [1, 3], "EmptyCategory": []}
 
-            ═══ REGLAS CRÍTICAS ═══
-
-            1. La DESCRIPCIÓN es MÁS IMPORTANTE que el nombre del TAG:
-               * Tag "Servicio" + Desc "hotel marriott" → Hotel/Hospedaje
-               * Tag "Servicio" + Desc "taxi aeropuerto" → Transporte
-               * Tag "Varios" + Desc "almuerzo restaurante" → Comida
-
-            2. Si un movimiento NO tiene descripción (dice "sin descripción"):
-               → Usa el nombre del TAG Y haz matching semántico con las categorías
-               → Ejemplos:
-                 • Tag "Servicio" sin desc → busca categorías con "servicio", "hotel", "transporte"
-                 • Tag "Comida" sin desc → busca categorías con "comida", "alimento", "restaurante"
-                 • Tag "Transporte" sin desc → busca categorías con "transporte", "movilidad", "taxi"
-
-            3. MATCHING SEMÁNTICO: Si un TAG coincide parcialmente con el nombre de una categoría, asígnalo:
-               * Tag "Servicio" puede ir a "Servicio hotel", "Transporte hotel" (ambos son servicios)
-               * Tag "Comida" puede ir a "Comida en viaje", "Comida y bebida"
-               * Tag "Transporte" puede ir a "Transporte hotel", "Transporte y movilidad"
-
-            4. Si múltiples categorías podrían funcionar, elige la más específica o la primera alfabéticamente
-
-            5. Cada movimiento va a UNA SOLA categoría (la mejor coincidencia)
-
-            6. IMPORTANTE: Movimientos con el MISMO TAG pueden ir a DIFERENTES categorías
-               si sus descripciones son diferentes:
-               * [0] Tag: "Servicio" | Desc: "hotel costa rica" → Hotel
-               * [5] Tag: "Servicio" | Desc: "compra regalo" → Regalos
-               (Ambos tienen tag "Servicio" pero van a categorías diferentes por sus descripciones)
-
-            7. USA los nombres EXACTOS de las categorías (respeta mayúsculas/minúsculas)
-
-            8. Responde SOLO con JSON, sin texto adicional antes o después
-
-            ═══ FORMATO DE SALIDA ═══
-            {
-              "Hotel": [0, 5, 12],
-              "Transporte": [1, 3, 7],
-              "Comida": [2, 4, 8, 10],
-              "Regalos": [],
-              "OtraCategoria": []
-            }
-
-            Donde los valores son arrays de índices [idx] de movimientos que pertenecen a esa categoría.
-            TODAS las categorías deben aparecer en el resultado (usa [] si no hay movimientos para esa categoría).
-        PROMPT;
+Values are arrays of movement indices [idx].
+PROMPT;
 
         Log::info('Llamando a Groq para analizar movimientos individuales', [
             'movements_count' => count($limitedMovements),
@@ -856,70 +764,32 @@ class MovementAIService
         $tagsList = implode("\n", $tagsInfo);
 
         $prompt = <<<PROMPT
-            TAREA: Clasifica cada etiqueta (tag) de gasto en la categoría del presupuesto que mejor corresponda.
+ROLE: You are a budget tag classifier. You assign user spending tags to budget categories.
 
-            ═══ CONTEXTO ═══
-            El usuario tiene estas CATEGORÍAS en su presupuesto:
-            [$categoriesList]
+TASK: Assign each tag to the single best-matching budget category. Return JSON only.
 
-            Y tiene estas ETIQUETAS con sus gastos reales:
-            $tagsList
+INPUT:
+Categories: [$categoriesList]
+Tags with spending data:
+$tagsList
 
-            ═══ METODOLOGÍA ═══
-            Para cada etiqueta sigue estos pasos:
+DECISION LOGIC:
+1. DESCRIPTIONS have higher priority than tag name:
+   - Tag "Varios" with descriptions ["almuerzo", "cena"] → Comida (descriptions reveal true type)
+   - Tag "Servicio" with descriptions ["hotel marriott"] → Hospedaje
+2. If NO descriptions → use tag name with semantic matching.
+3. If descriptions are MIXED types → assign to the predominant type.
+4. Each tag goes to exactly ONE category (best match).
+5. If a tag does not fit ANY category → do not include it.
 
-            1. LEE las descripciones reales de los movimientos (si existen)
-            2. IDENTIFICA de qué tipo de gasto se trata basándote en las descripciones
-            3. ASIGNA la etiqueta a la categoría del presupuesto que mejor coincida
+RULES:
+- Use EXACT category names (case-sensitive).
+- ALL categories must appear in output (use [] if no tags match).
+- Return JSON only. No explanations.
 
-            ═══ CASOS DE USO CRÍTICOS ═══
-
-            Caso 1: Tag genérico CON descripciones específicas
-            ✅ Tag "Varios" con descripciones: ["almuerzo restaurante", "cena familiar", "desayuno café"]
-               → Asignar a "Comida" o "Alimentación"
-               Razón: Las descripciones claramente hablan de comidas, NO importa que el tag se llame "Varios"
-
-            ✅ Tag "Servicio" con descripciones: ["hotel marriott", "hospedaje airbnb", "reserva hostal"]
-               → Asignar a "Hospedaje" o "Hotel" o "Alojamiento"
-               Razón: Las descripciones son de hospedaje, NO importa que el tag se llame "Servicio"
-
-            ✅ Tag "Gastos" con descripciones: ["uber aeropuerto", "taxi centro", "gasolina carro"]
-               → Asignar a "Transporte" o "Movilidad"
-               Razón: Las descripciones son de transporte
-
-            Caso 2: Tag específico SIN descripciones
-            ✅ Tag "Hotel" sin descripciones
-               → Asignar a "Hospedaje" o "Hotel" o "Alojamiento"
-               Razón: El nombre del tag es claro
-
-            ✅ Tag "Uber" sin descripciones
-               → Asignar a "Transporte" o "Movilidad"
-               Razón: Uber es claramente transporte
-
-            Caso 3: Tag con descripciones MIXTAS (contiene gastos de diferentes tipos)
-            ⚠️  Tag "Compras" con descripciones: ["hotel costa rica", "taxi aeropuerto", "almuerzo sodio"]
-               → Analiza cuál tipo predomina o cual tiene mayor monto
-               → Si es difícil decidir, asigna al tipo más común en las descripciones
-
-            ═══ REGLAS ESTRICTAS ═══
-            1. SIEMPRE prioriza las DESCRIPCIONES sobre el nombre del tag
-            2. Si NO hay descripciones, usa el nombre del tag con sentido común
-            3. Cada tag va a UNA SOLA categoría (la mejor coincidencia)
-            4. Si un tag no encaja en NINGUNA categoría, NO lo incluyas
-            5. USA los nombres EXACTOS de las categorías (respeta mayúsculas/minúsculas)
-            6. Devuelve SOLO JSON válido, SIN texto adicional antes o después
-            7. TODAS las categorías del presupuesto DEBEN aparecer en el resultado (aunque sea vacías [])
-
-            ═══ FORMATO DE SALIDA ═══
-            {
-              "Hospedaje": ["Hotel", "Servicio"],
-              "Transporte": ["Uber", "Gastos"],
-              "Comida": ["Varios", "Restaurantes"],
-              "OtraCategoria": []
-            }
-
-            Responde SOLO con el JSON, nada más.
-        PROMPT;
+OUTPUT:
+{"Hospedaje": ["Hotel", "Servicio"], "Transporte": ["Uber"], "Comida": ["Varios"], "EmptyCategory": []}
+PROMPT;
 
         $response = $this->callGroqAPI($prompt, 0.2, 1000);
 

@@ -27,6 +27,7 @@ class Budget extends Model
         'date_to',
         'suggested_tags_cache', // JSON: último resultado de la IA de sugerencias de tags
         'suggested_tags_hash',  // MD5: hash de los datos de gasto → detecta si cambió algo
+        'movement_overrides',   // JSON: {movement_id: category_name} para reasignaciones manuales
     ];
 
     protected $casts = [
@@ -35,6 +36,7 @@ class Budget extends Model
         'date_from' => 'date',
         'date_to' => 'date',
         'suggested_tags_cache' => 'array', // Laravel deserializa JSON automáticamente
+        'movement_overrides' => 'array',  // {movement_id: category_name}
     ];
 
     /**

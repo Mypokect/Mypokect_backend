@@ -150,6 +150,10 @@ class SavingGoalController extends Controller
                 $goal->emoji = $request->input('emoji');
             }
 
+            if ($request->has('status')) {
+                $goal->status = $request->input('status');
+            }
+
             $goal->save();
 
             // Reload with contributions sum

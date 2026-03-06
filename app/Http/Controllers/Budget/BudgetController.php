@@ -597,6 +597,7 @@ class BudgetController extends Controller
             $movementsPerCat = array_fill(0, count($categories), []);
 
             if (! empty($allTags)) {
+                // ── Modo normal: buscar por linked_tags ──
                 $movements = Movement::where('user_id', $userId)
                     ->where('type', 'expense')
                     ->whereBetween('created_at', [$fromTs, $toTs])
@@ -637,10 +638,108 @@ class BudgetController extends Controller
                         'date'        => $mov->created_at->format('Y-m-d'),
                     ];
                 }
+            } else {
+                // ── Fallback: sin linked_tags → matching por nombre de categoría ──
+                // Buscar TODOS los gastos del periodo y hacer fuzzy matching
+                // por nombre de tag/descripción contra nombres de categoría
+                $movements = Movement::where('user_id', $userId)
+                    ->where('type', 'expense')
+                    ->whereBetween('created_at', [$fromTs, $toTs])
+                    ->with('tag:id,name')
+                    ->get(['id', 'amount', 'tag_id', 'description', 'created_at']);
+
+                foreach ($movements as $mov) {
+                    $tagName     = mb_strtolower($mov->tag?->name ?? '');
+                    $description = mb_strtolower($mov->description ?? '');
+                    $amount      = (float) $mov->amount;
+
+                    // Intentar asignar a una categoría por similitud de nombre
+                    $bestIdx   = -1;
+                    $bestScore = 0;
+
+                    foreach ($categories as $idx => $cat) {
+                        $score = 0;
+                        $nameWords = $catNameWords[$idx];
+
+                        // Verificar si el tag o la descripción contienen palabras del nombre de categoría
+                        foreach ($nameWords as $word) {
+                            if (mb_strpos($tagName, $word) !== false) {
+                                $score += 3;
+                            }
+                            if (mb_strpos($description, $word) !== false) {
+                                $score += 2;
+                            }
+                        }
+
+                        // Verificar si el nombre de categoría contiene el tag
+                        $catNameLower = mb_strtolower($cat->name);
+                        if ($tagName && mb_strpos($catNameLower, $tagName) !== false) {
+                            $score += 4;
+                        }
+                        if ($tagName && mb_strpos($tagName, $catNameLower) !== false) {
+                            $score += 4;
+                        }
+
+                        if ($score > $bestScore) {
+                            $bestScore = $score;
+                            $bestIdx   = $idx;
+                        }
+                    }
+
+                    if ($bestIdx >= 0 && $bestScore >= 2) {
+                        $totalSpent += $amount;
+                        $spentPerCat[$bestIdx] += $amount;
+                        $movementsPerCat[$bestIdx][] = [
+                            'id'          => $mov->id,
+                            'amount'      => $amount,
+                            'description' => $mov->description,
+                            'tag'         => $mov->tag?->name,
+                            'date'        => $mov->created_at->format('Y-m-d'),
+                        ];
+                    }
+                }
             }
 
-            // ── PASO 4: Construir respuesta ──
+            // ── PASO 4: Aplicar movement_overrides (reasignaciones manuales) ──
+            $overrides = $budget->movement_overrides ?? [];
+            if (! empty($overrides)) {
+                // Construir mapa nombre→índice de categoría
+                $catNameToIdx = [];
+                foreach ($categories as $idx => $cat) {
+                    $catNameToIdx[$cat->name] = $idx;
+                }
+
+                foreach ($overrides as $movId => $targetCatName) {
+                    $targetIdx = $catNameToIdx[$targetCatName] ?? null;
+                    if ($targetIdx === null) continue;
+
+                    $movIdInt = (int) $movId;
+
+                    // Buscar y quitar el movimiento de su categoría actual
+                    foreach ($movementsPerCat as $fromIdx => &$movsList) {
+                        foreach ($movsList as $mKey => $m) {
+                            if (($m['id'] ?? null) === $movIdInt && $fromIdx !== $targetIdx) {
+                                $amount = (float) $m['amount'];
+                                // Quitar de origen
+                                $spentPerCat[$fromIdx] -= $amount;
+                                unset($movsList[$mKey]);
+                                $movsList = array_values($movsList);
+                                // Agregar a destino
+                                $spentPerCat[$targetIdx] += $amount;
+                                $movementsPerCat[$targetIdx][] = $m;
+                                break 2;
+                            }
+                        }
+                    }
+                    unset($movsList);
+                }
+            }
+
+            // ── PASO 5: Construir respuesta ──
             $categoriesData = [];
+
+            // Recalcular total_spent después de overrides
+            $totalSpent = array_sum($spentPerCat);
 
             foreach ($categories as $idx => $cat) {
                 $spent = round($spentPerCat[$idx], 2);
@@ -654,10 +753,10 @@ class BudgetController extends Controller
             }
 
             return $this->successResponse([
-                'budget_id'      => $budget->id,
-                'total_budgeted' => (float) $budget->total_amount,
-                'total_spent'    => round($totalSpent, 2),
-                'categories'     => $categoriesData,
+                'budget_id'          => $budget->id,
+                'total_budgeted'     => (float) $budget->total_amount,
+                'total_spent'        => round($totalSpent, 2),
+                'categories'         => $categoriesData,
             ]);
 
         } catch (\Exception $e) {
@@ -998,9 +1097,23 @@ class BudgetController extends Controller
             $updated = 0;
 
             foreach ($budget->categories as $category) {
-                $tagNames = $categoryTags[$category->name] ?? null;
+                if (!array_key_exists($category->name, $categoryTags)) {
+                    continue;
+                }
 
-                if ($tagNames === null || !is_array($tagNames) || empty($tagNames)) {
+                $tagNames = $categoryTags[$category->name];
+
+                if (!is_array($tagNames)) {
+                    continue;
+                }
+
+                // Si la lista está vacía, limpiar los linked_tags de esta categoría
+                if (empty($tagNames)) {
+                    $category->update([
+                        'linked_tags' => [],
+                        'linked_tags_since' => null,
+                    ]);
+                    $updated++;
                     continue;
                 }
 
@@ -1009,7 +1122,7 @@ class BudgetController extends Controller
 
                 $category->update([
                     'linked_tags' => $enriched,
-                    'linked_tags_since' => null, // No restringir por timestamp
+                    'linked_tags_since' => null,
                 ]);
 
                 $updated++;
@@ -1107,5 +1220,53 @@ class BudgetController extends Controller
         }
 
         return $bestIdx;
+    }
+
+    /**
+     * Move a single movement to a different category (manual override).
+     * POST /budgets/{budget}/move-movement
+     * Body: { movement_id: int, to_category: string }
+     */
+    public function moveMovement(Request $request, Budget $budget): JsonResponse
+    {
+        try {
+            if ($budget->user_id !== Auth::id()) {
+                return $this->unauthorizedResponse();
+            }
+
+            $validated = Validator::make($request->all(), [
+                'movement_id' => 'required|integer',
+                'to_category' => 'required|string',
+            ]);
+            if ($validated->fails()) {
+                return $this->validationErrorResponse($validated->errors());
+            }
+
+            $movementId = (string) $request->input('movement_id');
+            $toCategory = $request->input('to_category');
+
+            // Verificar que la categoría destino existe
+            $budget->load('categories');
+            $catExists = $budget->categories->contains(fn ($c) => $c->name === $toCategory);
+            if (! $catExists) {
+                return $this->validationErrorResponse(null, "Category '$toCategory' not found in this budget.");
+            }
+
+            // Leer overrides actuales y agregar/actualizar
+            $overrides = $budget->movement_overrides ?? [];
+            $overrides[$movementId] = $toCategory;
+
+            $budget->update(['movement_overrides' => $overrides]);
+
+            return $this->successResponse([
+                'message' => 'Movement override saved',
+                'movement_id' => $movementId,
+                'to_category' => $toCategory,
+                'total_overrides' => count($overrides),
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error moving movement: '.$e->getMessage());
+            return $this->errorResponse('Error: '.$e->getMessage());
+        }
     }
 }

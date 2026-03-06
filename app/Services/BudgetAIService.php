@@ -80,54 +80,40 @@ class BudgetAIService
             : ', "suggested_tags": ["tag1"]';
 
         $prompt = <<<PROMPT
-        Create a realistic and structured budget for a "$planType" plan.
+        ROL: Eres un planificador financiero experto que crea presupuestos realistas basados en patrones de gasto del mundo real.
 
-        Input:
-        - title: "$title"
-        - description: "$description"
-        - total: $amount
+        TAREA: Genera un presupuesto estructurado para un plan tipo "$planType".
 
-        Language:
-        - Detect the input language.
-        - ALL text values must be in that language.
-        - JSON keys remain in English.
+        INPUT:
+        - título: "$title"
+        - descripción: "$description"
+        - monto total: $amount
 
-        Process rules:
-        1. First infer the real plan intent (e.g. travel, event, study, purchase, project).
-        2. Use common real-world spending patterns for that plan.
-        3. Avoid generic categories unless strictly necessary.
-        4. Categories must be practical, specific, and non-overlapping.
-
-        Budget rules:
-        - Create 3–7 relevant categories.
-        - Each category must include:
-        - name
-        - amount
-        - reason (2–5 words, concrete)
-        - The sum of all amounts MUST equal total exactly.
-        - Amount distribution must be logical (no random splits).
+        REGLAS:
+        1. Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
+        2. Categorías: entre 3 y 7, prácticas, específicas y sin solapamiento.
+        3. Cada categoría lleva: name (string), amount (number), reason (2-5 palabras concretas).
+        4. La SUMA de todos los amount DEBE ser EXACTAMENTE igual a $amount. Distribución lógica, no partes iguales.
+        5. Infiere la intención real del plan (viaje, evento, compra, proyecto, etc.) y usa patrones de gasto reales para ese tipo.
+        6. No inventes categorías genéricas como "Otros" salvo que sea estrictamente necesario.
         {$tagsInstruction}
 
-        Timing:
-        - Infer duration from context (e.g. "5 días"→5, "mes"→30, "quincena"→15, "semana"→7).
-        - suggested_period: weekly (≤7d), biweekly (8–15d), monthly (16–31d), custom (>31d).
-        - duration_days: integer. Default 30 if unclear.
+        LÓGICA DE TIEMPO:
+        - Infiere duración del contexto: "5 días"→5, "mes"→30, "quincena"→15, "semana"→7.
+        - suggested_period: "weekly" (≤7d), "biweekly" (8-15d), "monthly" (16-31d), "custom" (>31d).
+        - duration_days: entero. Default 30 si no es claro.
 
-        Advice:
-        - Add ONE short, strategic general_advice related to the plan.
+        CONSEJO:
+        - general_advice: UNA frase corta, estratégica, relacionada al plan.
 
-        Output:
-        - Return ONLY valid JSON.
-        - No explanations, no extra text.
-
-        Format:
+        OUTPUT — JSON válido, sin texto adicional:
         {
-        "categories": [
+          "categories": [
             { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
-        ],
-        "general_advice": "",
-        "suggested_period": "monthly",
-        "duration_days": 30
+          ],
+          "general_advice": "",
+          "suggested_period": "monthly",
+          "duration_days": 30
         }
 
         PROMPT;
@@ -231,7 +217,21 @@ class BudgetAIService
     public function interpretVoiceCommand(string $text): array
     {
         $prompt = <<<PROMPT
-        Extract one expense (name, integer amount) from: "$text". Convert k/mil/millón/millones to numbers, clean the name, return ONLY valid JSON: {"name":"","amount":0}
+        ROL: Eres un parser de texto financiero que extrae datos de gastos de lenguaje natural.
+
+        TAREA: Extrae exactamente UN gasto (nombre y monto) del texto del usuario.
+
+        INPUT: "$text"
+
+        REGLAS:
+        1. Convierte abreviaturas numéricas: "k"→×1000, "mil"→×1000, "millón/millones"→×1000000.
+        2. El amount debe ser un entero positivo (sin decimales).
+        3. El name debe ser limpio: sin montos, sin artículos innecesarios, primera letra mayúscula.
+        4. Si hay múltiples gastos en el texto, extrae solo el primero.
+        5. Si no se detecta monto, amount = 0.
+
+        OUTPUT — JSON válido, sin texto adicional:
+        {"name": "", "amount": 0}
 
         PROMPT;
 

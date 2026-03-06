@@ -225,7 +225,7 @@ class GoalContributionController extends Controller
     private function transformToContribution(GoalContribution $contribution, SavingGoal $goal): array
     {
         return [
-            'id' => "gc_{$contribution->id}",
+            'id' => $contribution->id,
             'goal_id' => $goal->id,
             'goal_name' => $goal->name,
             'amount' => (float) $contribution->amount,
