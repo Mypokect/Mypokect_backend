@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class SavingsController extends Controller
 {
@@ -56,7 +57,10 @@ class SavingsController extends Controller
             ], 200);
 
         } catch (\Throwable $e) {
-            return response()->json(['error' => 'Error', 'message' => $e->getMessage()], 500);
+            Log::error('Savings analysis error: ' . $e->getMessage());
+            $message = config('app.debug') ? $e->getMessage() : 'Ocurrió un error interno en el servidor.';
+
+            return response()->json(['error' => 'Error', 'message' => $message], 500);
         }
     }
 

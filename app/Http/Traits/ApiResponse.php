@@ -98,4 +98,15 @@ trait ApiResponse
     {
         return response()->json(null, 204);
     }
+
+    /**
+     * Return a safe error message depending on environment.
+     *
+     * In debug mode (local/dev), returns the real exception message for developers.
+     * In production, returns a generic message to avoid leaking internal details.
+     */
+    protected function safeMessage(\Throwable $e): string
+    {
+        return config('app.debug') ? $e->getMessage() : 'Ocurrió un error interno en el servidor.';
+    }
 }

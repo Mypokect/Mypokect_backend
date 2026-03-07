@@ -8,7 +8,10 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
@@ -18,6 +21,7 @@ class AuthController extends Controller
      * Login.
      *
      * Authenticates user with phone number and 4-digit PIN. Returns a Sanctum bearer token.
+     * Implements per-account rate limiting: 5 failed attempts locks the account for 10 minutes.
      *
      * @bodyParam phone string required User's phone number. Example: 3001234567
      * @bodyParam password string required 4-digit PIN. Example: 1234
@@ -27,23 +31,38 @@ class AuthController extends Controller
     {
         $validated = Validator::make($request->all(), [
             'phone' => 'required|string|max:20',
-            'password' => 'required|digits:4',
+            'password' => 'required|string',
         ]);
 
         if ($validated->fails()) {
             return $this->validationErrorResponse($validated->errors(), 'Datos de inicio de sesión inválidos');
         }
 
+        // Rate limiting per account (phone number), not just per IP
+        $throttleKey = 'login_attempt:' . Str::lower($request->input('phone'));
+
+        if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
+            $seconds = RateLimiter::availableIn($throttleKey);
+
+            return $this->errorResponse(
+                "Cuenta bloqueada temporalmente. Intente en {$seconds} segundos.",
+                429
+            );
+        }
+
         try {
             $user = User::where('phone', $request->input('phone'))->first();
 
-            if (! $user) {
-                return $this->notFoundResponse('Credenciales no válidas');
+            // Unified error: same message for "user not found" and "wrong password"
+            // to prevent user enumeration attacks
+            if (! $user || ! Hash::check($request->input('password'), $user->password)) {
+                RateLimiter::hit($throttleKey, 600); // Lock for 10 minutes after 5 failures
+
+                return $this->errorResponse('Credenciales inválidas', 401);
             }
 
-            if (! Hash::check($request->input('password'), $user->password)) {
-                return $this->errorResponse('Contraseña incorrecta', 401);
-            }
+            // Success: clear rate limiter
+            RateLimiter::clear($throttleKey);
 
             $token = $user->createToken('auth_token')->plainTextToken;
 
@@ -53,7 +72,9 @@ class AuthController extends Controller
             ], 'Inicio de sesión exitoso');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error al iniciar sesión', 500, ['error' => $e->getMessage()]);
+            Log::error('Login error: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -97,7 +118,9 @@ class AuthController extends Controller
             ], 'Usuario registrado exitosamente');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error al registrar usuario', 500, ['error' => $e->getMessage()]);
+            Log::error('Register error: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 

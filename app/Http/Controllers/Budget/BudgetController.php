@@ -104,7 +104,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('Error fetching budgets: '.$e->getMessage());
 
-            return $this->errorResponse('Error fetching budgets: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -152,7 +152,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('Error reactivating budget: '.$e->getMessage());
 
-            return $this->errorResponse('Error reactivating budget: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -207,7 +207,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error("Error duplicating budget {$budget->id}: ".$e->getMessage());
 
-            return $this->errorResponse('Error al duplicar: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -237,7 +237,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error fetching single budget: '.$e->getMessage());
 
-            return $this->errorResponse('Error fetching budget: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -260,7 +260,7 @@ class BudgetController extends Controller
      */
     public function createManualBudget(Request $request): JsonResponse
     {
-        Log::info('SmartBudget: Attempting to create MANUAL budget.', $request->all());
+        Log::info('SmartBudget: Attempting to create MANUAL budget.');
 
         $validated = Validator::make($request->all(), [
             'title' => 'required|string|max:255',
@@ -300,7 +300,7 @@ class BudgetController extends Controller
             return $this->validationErrorResponse(null, $e->getMessage());
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error creating manual budget: '.$e->getMessage());
-            return $this->errorResponse('Error creating budget: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -362,7 +362,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error in generateAIBudget: '.$e->getMessage());
 
-            return $this->errorResponse('Error generating AI suggestions: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -425,7 +425,7 @@ class BudgetController extends Controller
             return $this->validationErrorResponse(null, $e->getMessage());
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error saving AI budget: '.$e->getMessage());
-            return $this->errorResponse('Error saving budget: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -513,7 +513,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error deleting budget: '.$e->getMessage());
 
-            return $this->errorResponse('Error deleting budget: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -552,7 +552,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error adding category: '.$e->getMessage());
 
-            return $this->errorResponse('Error adding category: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -576,7 +576,9 @@ class BudgetController extends Controller
 
             return $this->successResponse($data);
         } catch (\Exception $e) {
-            return $this->errorResponse('Error procesando voz: '.$e->getMessage());
+            Log::error('Error processing voice command: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -823,7 +825,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error fetching spending: '.$e->getMessage());
 
-            return $this->errorResponse('Error fetching spending: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -853,7 +855,9 @@ class BudgetController extends Controller
                     : "Categories total ($categoriesTotal) differs from budget total ({$budget->total_amount})",
             ]);
         } catch (\Exception $e) {
-            return $this->errorResponse('Error validating budget: '.$e->getMessage());
+            Log::error('Error validating budget: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -889,7 +893,9 @@ class BudgetController extends Controller
 
             return $this->successResponse($category);
         } catch (\Exception $e) {
-            return $this->errorResponse('Error updating category: '.$e->getMessage());
+            Log::error('Error updating category: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -913,7 +919,9 @@ class BudgetController extends Controller
 
             return $this->deletedResponse('Category deleted');
         } catch (\Exception $e) {
-            return $this->errorResponse('Error deleting category: '.$e->getMessage());
+            Log::error('Error deleting category: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -1042,8 +1050,6 @@ class BudgetController extends Controller
 
             Log::info('Movimientos individuales preparados', [
                 'count' => count($movementsData),
-                'sample' => array_slice($movementsData, 0, 10),
-                'all_movements' => $movementsData, // Log ALL movements to debug
             ]);
 
             $categoryNames = $budget->categories->pluck('name')->toArray();
@@ -1109,7 +1115,7 @@ class BudgetController extends Controller
         } catch (\Exception $e) {
             Log::error('Error getting suggested tags: '.$e->getMessage());
 
-            return $this->errorResponse('Error: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -1140,7 +1146,7 @@ class BudgetController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Error clearing suggested tags cache: '.$e->getMessage());
-            return $this->errorResponse('Error: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -1211,7 +1217,7 @@ class BudgetController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error applying AI tags: '.$e->getMessage());
-            return $this->errorResponse('Error: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -1340,7 +1346,7 @@ class BudgetController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Error moving movement: '.$e->getMessage());
-            return $this->errorResponse('Error: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 }

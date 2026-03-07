@@ -8,6 +8,7 @@ use App\Models\SavingGoal;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
 class SavingGoalController extends Controller
@@ -45,7 +46,9 @@ class SavingGoalController extends Controller
             return $this->successResponse($goals);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error fetching saving goals: '.$e->getMessage());
+            Log::error('Error fetching saving goals: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -94,7 +97,9 @@ class SavingGoalController extends Controller
             return $this->createdResponse(['saving_goal' => $goal], 'Saving goal created successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error creating saving goal: '.$e->getMessage());
+            Log::error('Error creating saving goal: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -126,7 +131,9 @@ class SavingGoalController extends Controller
             return $this->successResponse($goal);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error fetching saving goal: '.$e->getMessage());
+            Log::error('Error fetching saving goal: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -202,7 +209,9 @@ class SavingGoalController extends Controller
             return $this->successResponse(['saving_goal' => $goal], 'Saving goal updated successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error updating saving goal: '.$e->getMessage());
+            Log::error('Error updating saving goal: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -220,7 +229,9 @@ class SavingGoalController extends Controller
             return $this->deletedResponse('Saving goal deleted successfully');
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error deleting saving goal: '.$e->getMessage());
+            Log::error('Error deleting saving goal: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 }

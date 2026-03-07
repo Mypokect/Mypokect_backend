@@ -133,9 +133,11 @@ class TransactionController extends Controller
         } catch (\Exception $e) {
             Log::error('Error fetching unified transactions: '.$e->getMessage());
 
+            $message = config('app.debug') ? $e->getMessage() : 'Ocurrió un error interno en el servidor.';
+
             return response()->json([
                 'error' => 'Error fetching transactions',
-                'message' => $e->getMessage(),
+                'message' => $message,
             ], 500);
         }
     }

@@ -132,7 +132,9 @@ class TaxController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Error: '.$e->getMessage());
+            Log::error('Tax limits error: ' . $e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 

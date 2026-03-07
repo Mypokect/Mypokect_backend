@@ -52,7 +52,7 @@ class TagController extends Controller
         } catch (\Exception $e) {
             Log::error('Error fetching tags: '.$e->getMessage());
 
-            return $this->errorResponse('Error servidor: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -82,7 +82,7 @@ class TagController extends Controller
         } catch (\Exception $e) {
             Log::error('Error saving tag: '.$e->getMessage());
 
-            return $this->errorResponse('Error servidor: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -111,7 +111,7 @@ class TagController extends Controller
         } catch (\Exception $e) {
             Log::error('Error generating tag suggestion: '.$e->getMessage());
 
-            return $this->errorResponse('No se pudo sugerir: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 }

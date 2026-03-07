@@ -57,7 +57,7 @@ class GoalContributionController extends Controller
         } catch (\Exception $e) {
             Log::error('Error fetching contributions: '.$e->getMessage());
 
-            return $this->errorResponse('Error fetching contributions', 500, ['message' => $e->getMessage()]);
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -125,7 +125,7 @@ class GoalContributionController extends Controller
             DB::rollBack();
             Log::error('Error creating contribution: '.$e->getMessage());
 
-            return $this->errorResponse('Error creating contribution', 500, ['message' => $e->getMessage()]);
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -165,7 +165,7 @@ class GoalContributionController extends Controller
             DB::rollBack();
             Log::error('Error deleting contribution: '.$e->getMessage());
 
-            return $this->errorResponse('Error deleting contribution', 500, ['message' => $e->getMessage()]);
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
@@ -223,7 +223,7 @@ class GoalContributionController extends Controller
         } catch (\Exception $e) {
             Log::error('Error fetching stats: '.$e->getMessage());
 
-            return $this->errorResponse('Error fetching statistics', 500, ['message' => $e->getMessage()]);
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
