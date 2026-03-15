@@ -23,8 +23,9 @@ class MovementResource extends JsonResource
                 return $this->tag?->name ?? '';
             }, ''),
             'payment_method' => $this->payment_method ?? 'digital',
-            'has_invoice' => (bool) $this->has_invoice,
-            'created_at' => $this->created_at->toIso8601String(),
+            'has_invoice'         => (bool) $this->has_invoice,
+            'is_business_expense' => (bool) $this->is_business_expense,
+            'created_at'          => $this->created_at->toIso8601String(),
         ];
     }
 }

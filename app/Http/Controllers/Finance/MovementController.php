@@ -81,7 +81,8 @@ class MovementController extends Controller
                 'amount' => $request->amount,
                 'description' => $request->description ?? 'Movimiento',
                 'payment_method' => $request->payment_method,
-                'has_invoice' => $request->has_invoice ?? false,
+                'has_invoice'         => $request->has_invoice ?? false,
+                'is_business_expense' => $request->is_business_expense ?? false,
                 'user_id' => $user->id,
                 'tag_id' => $tagId,
             ]);

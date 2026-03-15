@@ -23,6 +23,7 @@ class Movement extends Model
         'tag_id',
         'payment_method',
         'has_invoice',
+        'is_business_expense',
     ];
 
     /**
@@ -31,10 +32,11 @@ class Movement extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'amount' => 'decimal:2',
-        'has_invoice' => 'boolean',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
+        'amount'              => 'decimal:2',
+        'has_invoice'         => 'boolean',
+        'is_business_expense' => 'boolean',
+        'created_at'          => 'datetime',
+        'updated_at'          => 'datetime',
     ];
 
     /**

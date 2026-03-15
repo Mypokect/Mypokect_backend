@@ -29,7 +29,8 @@ class CreateMovementRequest extends FormRequest
             'description' => 'nullable|string|max:255',
             'payment_method' => 'required|string|in:cash,digital',
             'tag_name' => 'nullable|string|max:50',
-            'has_invoice' => 'nullable|boolean',
+            'has_invoice'         => 'nullable|boolean',
+            'is_business_expense' => 'nullable|boolean',
         ];
     }
 
