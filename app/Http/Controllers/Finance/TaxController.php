@@ -306,6 +306,58 @@ class TaxController extends Controller
             $resultado['deduccion_compras_generales'] = round($gastosDeduciblesGenerales * 0.01, 2);
             $resultado['costos_gastos_actividad']     = $costosGastos;
 
+            // ── Radar Fiscal simulado — valores del request, sin tocar la BD ──────────
+            $consumoTarjetas = round($ingresos * 0.3, 2);
+            $radarItems = [
+                $this->buildRadarItem(
+                    label:       'Ingresos Brutos',
+                    valorActual: $ingresos,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_INGRESOS_BRUTOS, $year),
+                    descripcion: 'Obligación de declarar renta',
+                ),
+                $this->buildRadarItem(
+                    label:       'Consumo Tarjetas',
+                    valorActual: $consumoTarjetas,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_INGRESOS_BRUTOS, $year),
+                    descripcion: 'Estimado 30% ingresos · DIAN cruza con bancos',
+                ),
+                $this->buildRadarItem(
+                    label:       'Consignaciones',
+                    valorActual: $ingresos,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_INGRESOS_BRUTOS, $year),
+                    descripcion: 'Depósitos bancarios acumulados en el año',
+                ),
+                $this->buildRadarItem(
+                    label:       'Patrimonio Bruto',
+                    valorActual: $patrimonio,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_PATRIMONIO, $year),
+                    descripcion: 'Bienes y derechos a 31 dic',
+                ),
+                $this->buildRadarItem(
+                    label:       'Facturación Electrónica',
+                    valorActual: $ingresos,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_FACTURACION, $year),
+                    descripcion: 'Tope de contratos con e-factura',
+                ),
+                $this->buildRadarItem(
+                    label:       'Régimen Simple',
+                    valorActual: $ingresos,
+                    valorTope:   UvtHelper::enPesos(UvtHelper::UVT_REGIMEN_SIMPLE, $year),
+                    descripcion: 'Umbral máximo para acogerse al SIMPLE',
+                ),
+            ];
+
+            $excedidos  = count(array_filter($radarItems, fn ($i) => $i['estado'] === 'peligro'));
+            $advertidos = count(array_filter($radarItems, fn ($i) => $i['estado'] === 'advertencia'));
+            $radarSummary = $excedidos > 0
+                ? "⚠️ Superarías $excedidos tope(s) fiscal(es) con estos ingresos."
+                : ($advertidos > 0
+                    ? "🟡 Te acercarías a $advertidos límite(s). Vigila tus ingresos."
+                    : '✅ Dentro de todos los límites con estos ingresos.');
+
+            $resultado['radar_items']   = $radarItems;
+            $resultado['radar_summary'] = $radarSummary;
+
             // Adjunta metadata con topes actualizados para que Flutter los pinte al instante
             $resultado['metadata'] = [
                 'topes' => [
