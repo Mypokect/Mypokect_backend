@@ -160,17 +160,19 @@ class TaxController extends Controller
             $segSocialDefault = round($ingresosTotales * 0.08, 2); // 4% EPS + 4% pensión
 
             $resultadoPorDefecto = $this->calcularImpuesto(
-                ingresosTotales:      $ingresosTotales,
+                ingresosTotales:         $ingresosTotales,
                 ingresosNoConstitutivos: $segSocialDefault,
-                deducVivienda:        (float) ($profile?->deduc_vivienda ?? 0),
-                deducSaludPrep:       (float) ($profile?->deduc_salud    ?? 0),
-                numeroDependientes:   (int)   ($profile?->dependientes   ?? 0),
-                aportesVoluntarios:   0.0,
-                costosGastos:         0.0,
-                aplicarRentaExenta25: true,
-                retenciones:          (float) ($profile?->retenciones    ?? 0),
-                patrimonio:           (float) ($profile?->patrimonio     ?? 0),
-                segSocialParaDisplay: $segSocialDefault,
+                deducVivienda:           (float) ($profile?->deduc_vivienda ?? 0),
+                deducSaludPrep:          (float) ($profile?->deduc_salud    ?? 0),
+                numeroDependientes:      (int)   ($profile?->dependientes   ?? 0),
+                aportesVoluntarios:      0.0,
+                costosGastos:            0.0,
+                aplicarRentaExenta25:    true,
+                retenciones:             (float) ($profile?->retenciones    ?? 0),
+                patrimonio:              (float) ($profile?->patrimonio     ?? 0),
+                segSocialParaDisplay:    $segSocialDefault,
+                deduccion1pctFE:         $deduccionComprasGenerales * 0.01,
+                uvt:                     $uvt,
             );
 
             return $this->successResponse([
@@ -288,6 +290,8 @@ class TaxController extends Controller
                 ->whereBetween('created_at', [$start, $end])
                 ->sum('amount');
 
+            $deduccion1pctFE = round($gastosDeduciblesGenerales * 0.01, 2);
+
             $resultado = $this->calcularImpuesto(
                 ingresosTotales:         $ingresos,
                 ingresosNoConstitutivos: $segSocial,
@@ -300,10 +304,12 @@ class TaxController extends Controller
                 retenciones:             $retenciones,
                 patrimonio:              $patrimonio,
                 segSocialParaDisplay:    $segSocial,
+                deduccion1pctFE:         $deduccion1pctFE,
+                uvt:                     $uvt,
             );
 
             // Beneficios por compras — Flutter los muestra en la sección Ley 2277
-            $resultado['deduccion_compras_generales'] = round($gastosDeduciblesGenerales * 0.01, 2);
+            $resultado['deduccion_compras_generales'] = $deduccion1pctFE;
             $resultado['costos_gastos_actividad']     = $costosGastos;
 
             // ── Radar Fiscal simulado — valores del request, sin tocar la BD ──────────
@@ -473,73 +479,90 @@ class TaxController extends Controller
         }
     }
 
-    // ── Motor Fiscal (Art 241 E.T.) ───────────────────────────────────────────
-    // Equivale al TaxEngine2023.dart — ahora vive solo en el backend.
+    // ── Motor Fiscal (Art 241 + Art 336 E.T., Ley 2277 de 2022) ─────────────
+    // Única fuente de verdad fiscal. Flutter solo mapea y pinta.
 
     private function calcularImpuesto(
         float $ingresosTotales,
-        float $ingresosNoConstitutivos,
-        float $deducVivienda,
-        float $deducSaludPrep,
+        float $ingresosNoConstitutivos,   // seg. social (EPS + pensión)
+        float $deducVivienda,             // intereses crédito hipotecario / leasing
+        float $deducSaludPrep,            // medicina prepagada
         int   $numeroDependientes,
         float $aportesVoluntarios,
-        float $costosGastos,
+        float $costosGastos,              // costos y gastos actividad (independiente/comerciante)
         bool  $aplicarRentaExenta25 = true,
         float $retenciones          = 0.0,
         float $patrimonio           = 0.0,
         float $segSocialParaDisplay = 0.0,
+        // ── Beneficios EXTRA (fuera del tope 40%) ──────────────────────────
+        float $deduccion1pctFE      = 0.0,  // Art 258 E.T.: 1% compras con FE + digital
+        float $uvt                  = 49799.0, // valor UVT del año (default: 2025)
     ): array {
-        $UVT                       = 49799.0;
-        $LIMITE_VIVIENDA_ANUAL_UVT = 1200;
-        $LIMITE_PREPAGADA_ANUAL_UVT= 192;
-        $DEDUC_DEPENDIENTE_UVT     = 72;
-        $TOPE_25_LABORAL_UVT       = 790;
-        $TOPE_GLOBAL_40_PCT        = 0.40;
-        $TOPE_GLOBAL_ANUAL_UVT     = 1340;
-        $TOPE_OBLIGACION_UVT       = 1400;
+        // ── Constantes legales (en UVT) ───────────────────────────────────
+        $LIMITE_VIVIENDA_ANUAL_UVT  = 1200;  // Art 119 E.T.
+        $LIMITE_PREPAGADA_ANUAL_UVT = 192;   // Art 387 E.T.
+        $DEDUC_DEPENDIENTE_UVT      = 72;    // Art 387 E.T., máx 4 dependientes
+        $TOPE_25_LABORAL_UVT        = 790;   // Art 206-10 E.T.
+        $TOPE_GLOBAL_40_PCT         = 0.40;  // Art 336 E.T. párrafo 4
+        $TOPE_GLOBAL_ANUAL_UVT      = 1340;  // Art 336 E.T. párrafo 4
+        $TOPE_OBLIGACION_UVT        = 1400;  // obligación de declarar renta
 
-        // A. Renta líquida ordinaria
+        // ── A. Renta Líquida (Art 336) ────────────────────────────────────
+        // = Ingresos Brutos - Ingresos No Constitutivos (seg. social) - Costos y Gastos actividad
         $ingresosNetos = max(0.0, $ingresosTotales - $ingresosNoConstitutivos - $costosGastos);
 
-        // B. Deducción dependientes (fuera del límite 40% — Ley 2277)
-        $numDep               = min($numeroDependientes, 4);
-        $deducDependientesExtra = round($numDep * $DEDUC_DEPENDIENTE_UVT * $UVT);
+        // ── B. Beneficios FUERA del tope 40% (se restan después del tope) ─
+        // B.1 Dependientes — Art 387 E.T.: 72 UVT × dep., máx 4
+        $numDep                 = min($numeroDependientes, 4);
+        $deducDependientesExtra = round($numDep * $DEDUC_DEPENDIENTE_UVT * $uvt);
+        // B.2 Deducción 1% FE — Art 258 E.T. (Ley 2277): ya viene como monto absoluto
+        $deduc1pctFEAplicada    = max(0.0, $deduccion1pctFE);
 
-        // C. Deducciones sujetas al tope del 40%
-        $dVivienda = min($deducVivienda, $LIMITE_VIVIENDA_ANUAL_UVT * $UVT);
-        $dSalud    = min($deducSaludPrep, $LIMITE_PREPAGADA_ANUAL_UVT * $UVT);
+        // ── C. Deducciones SUJETAS al tope 40% (Art 336) ─────────────────
+        // Incluye: Intereses Vivienda + Prepagada + Renta Exenta 25%
+        $dVivienda           = min($deducVivienda,   $LIMITE_VIVIENDA_ANUAL_UVT  * $uvt);
+        $dSalud              = min($deducSaludPrep,  $LIMITE_PREPAGADA_ANUAL_UVT * $uvt);
         $subtotalDeducciones = $dVivienda + $dSalud + $aportesVoluntarios;
 
-        // D. Renta exenta 25% (Art 206-10) — solo empleados e independientes
+        // ── D. Renta exenta 25% (Art 206-10) — sujeta al tope 40% ────────
         $rentaExenta25 = 0.0;
         if ($aplicarRentaExenta25) {
             $basePara25    = $ingresosNetos - $subtotalDeducciones;
             $rentaExenta25 = $basePara25 > 0 ? $basePara25 * 0.25 : 0.0;
-            $tope25Pesos   = $TOPE_25_LABORAL_UVT * $UVT;
+            $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
             if ($rentaExenta25 > $tope25Pesos) {
                 $rentaExenta25 = $tope25Pesos;
             }
         }
 
-        // E. Límite global 40% (o 1.340 UVT — el menor)
-        $beneficiosSujetosAlTope  = $subtotalDeducciones + $rentaExenta25;
-        $limiteGlobal40            = $ingresosNetos * $TOPE_GLOBAL_40_PCT;
-        $limiteGlobalUVT           = $TOPE_GLOBAL_ANUAL_UVT * $UVT;
-        $limiteFinalBeneficios     = min($limiteGlobal40, $limiteGlobalUVT);
-        $beneficiosAplicadosSujetos= min($beneficiosSujetosAlTope, $limiteFinalBeneficios);
-        $superoTope                = $beneficiosSujetosAlTope > $limiteFinalBeneficios;
+        // ── E. Tope global: 40% de Renta Líquida ó 1.340 UVT (el menor) — Art 336 ──
+        $beneficiosSujetosAlTope    = $subtotalDeducciones + $rentaExenta25;
+        $limiteGlobal40             = $ingresosNetos * $TOPE_GLOBAL_40_PCT;
+        $limiteGlobalUVT            = $TOPE_GLOBAL_ANUAL_UVT * $uvt;
+        $limiteFinalBeneficios      = min($limiteGlobal40, $limiteGlobalUVT);
+        $beneficiosAplicadosSujetos = min($beneficiosSujetosAlTope, $limiteFinalBeneficios);
+        $superoTope                 = $beneficiosSujetosAlTope > $limiteFinalBeneficios;
 
-        // F. Base gravable final
-        $baseGravable = max(0.0, $ingresosNetos - $beneficiosAplicadosSujetos - $deducDependientesExtra);
+        // ── F. Base Gravable Final ────────────────────────────────────────
+        // = Renta Líquida
+        //   - Beneficios del tope 40% (cap aplicado)        [sujetos al tope]
+        //   - Deducción dependientes (Art 387)               [fuera del tope]
+        //   - Deducción 1% FE compras digitales (Art 258)   [fuera del tope]
+        $baseGravable = max(0.0,
+            $ingresosNetos
+            - $beneficiosAplicadosSujetos
+            - $deducDependientesExtra
+            - $deduc1pctFEAplicada
+        );
 
-        // G. Impuesto — Tabla progresiva Art 241 E.T.
-        $baseUVT       = $baseGravable / $UVT;
+        // ── G. Impuesto — Tabla progresiva Art 241 E.T. (Ley 2277) ──────────
+        $baseUVT       = $baseGravable / $uvt;
         $impuestoUVT   = $this->applyArt241($baseUVT);
-        $impuestoBruto = round($impuestoUVT * $UVT);
+        $impuestoBruto = round($impuestoUVT * $uvt);
 
         // Obligación de declarar
-        $topeDeclararPesos = $TOPE_OBLIGACION_UVT * $UVT;
-        $esObligado = $ingresosTotales > $topeDeclararPesos || $patrimonio > (4500 * $UVT);
+        $topeDeclararPesos = $TOPE_OBLIGACION_UVT * $uvt;
+        $esObligado = $ingresosTotales > $topeDeclararPesos || $patrimonio > (4500 * $uvt);
 
         // Impuesto neto a pagar (después de retenciones)
         $impuestoAPagar = max(0.0, $impuestoBruto - $retenciones);
@@ -566,6 +589,7 @@ class TaxController extends Controller
             'menos_salud_pension'        => round($ingresosNoConstitutivos),
             'menos_costos_gastos'        => round($costosGastos),
             'subtotal_ingresos_netos'    => round($ingresosNetos),
+            // ── Sujetos al tope 40% ──
             'menos_deduccion_vivienda'   => round($dVivienda),
             'menos_deduccion_salud_prep' => round($dSalud),
             'menos_aportes_voluntarios'  => round($aportesVoluntarios),
@@ -573,7 +597,10 @@ class TaxController extends Controller
             'aplico_tope_40'             => $superoTope,
             'ajuste_por_tope_40'         => $superoTope ? round($beneficiosSujetosAlTope - $beneficiosAplicadosSujetos) : 0,
             'beneficios_totales'         => round($beneficiosAplicadosSujetos),
+            // ── FUERA del tope 40% (Art 387 + Art 258) ──
             'menos_dependientes'         => round($deducDependientesExtra),
+            'menos_deduccion_1pct_fe'    => round($deduc1pctFEAplicada),
+            // ── Resultado ──
             'base_gravable_final'        => round($baseGravable),
             'impuesto_resultante'        => $impuestoBruto,
             'total_protegido'            => round($totalProtegido),
@@ -585,6 +612,7 @@ class TaxController extends Controller
             'ingresos_brutos'              => round($ingresosTotales),
             'ingresos_netos'               => round($ingresosNetos),
             'seg_social_calculada'         => round($segSocialParaDisplay),
+            // ── Sujetos al tope 40% ──
             'deduc_vivienda_aplicada'      => round($dVivienda),
             'deduc_salud_aplicada'         => round($dSalud),
             'aportes_voluntarios'          => round($aportesVoluntarios),
@@ -593,7 +621,10 @@ class TaxController extends Controller
             'beneficios_tope_40'           => round($beneficiosAplicadosSujetos),
             'supero_tope_40'               => $superoTope ? 1 : 0,
             'limite_final_beneficios'      => round($limiteFinalBeneficios),
+            // ── FUERA del tope 40% ──
             'deduccion_dependientes_extra' => round($deducDependientesExtra),
+            'deduccion_1pct_fe_aplicada'   => round($deduc1pctFEAplicada), // Art 258 E.T.
+            // ── Base y resultado ──
             'base_gravable'                => round($baseGravable),
             'base_gravable_uvt'            => round($baseUVT, 2),
             'impuesto_bruto'               => $impuestoBruto,

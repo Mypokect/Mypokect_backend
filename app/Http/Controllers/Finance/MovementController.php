@@ -14,6 +14,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class MovementController extends Controller
 {
@@ -94,7 +95,19 @@ class MovementController extends Controller
 
             Log::info("Movement {$movement->id} created successfully by user {$user->id}");
 
-            return $this->createdResponse(new MovementResource($movement), 'Movimiento creado');
+            // ── Alcancía con Fuga (Ahorro Reactivo) ───────────────────────────
+            $leakInfo = $this->applyLeakyBucket($user, $movement);
+
+            $responseData = new MovementResource($movement);
+
+            if ($leakInfo !== null) {
+                return $this->createdResponse([
+                    'movement'  => $responseData,
+                    'leak_info' => $leakInfo,
+                ], 'Movimiento creado');
+            }
+
+            return $this->createdResponse($responseData, 'Movimiento creado');
 
         } catch (\Exception $e) {
             DB::rollBack();
@@ -102,6 +115,75 @@ class MovementController extends Controller
 
             return $this->errorResponse('Error al crear movimiento: ' . $this->safeMessage($e));
         }
+    }
+
+    /**
+     * Alcancía con Fuga — resta del saldo protegido cuando el gasto supera el techo diario.
+     * Devuelve null si no aplica o si no hay fuga en este movimiento.
+     */
+    private function applyLeakyBucket($user, $movement): ?array
+    {
+        if ($movement->type !== 'expense') {
+            return null;
+        }
+
+        if (! Schema::hasColumn('users', 'challenge_savings_balance')) {
+            return null;
+        }
+
+        $user->refresh();
+
+        if (! $user->has_active_challenge || $user->savings_mode_pct <= 0) {
+            return null;
+        }
+
+        $now          = now();
+        $startOfMonth = $now->copy()->startOfMonth();
+        $endOfMonth   = $now->copy()->endOfMonth();
+        $startOfDay   = $now->copy()->startOfDay();
+        $endOfDay     = $now->copy()->endOfDay();
+
+        $incomesMes = (float) $user->movements()
+            ->where('type', 'income')
+            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+            ->sum('amount');
+
+        if ($incomesMes <= 0) {
+            return null;
+        }
+
+        $metaAhorro  = $incomesMes * (float) $user->savings_mode_pct;
+        $techoDiario = ($incomesMes - $metaAhorro) / 30;
+
+        // Gastos totales de hoy (el nuevo movimiento ya está en DB tras commit)
+        $gastosHoy      = (float) $user->movements()
+            ->where('type', 'expense')
+            ->whereBetween('created_at', [$startOfDay, $endOfDay])
+            ->sum('amount');
+
+        $gastosHoyAntes  = $gastosHoy - (float) $movement->amount;
+
+        $excesoAnterior  = max(0.0, $gastosHoyAntes - $techoDiario);
+        $excesoNuevo     = max(0.0, $gastosHoy - $techoDiario);
+        $fugaIncremental = round($excesoNuevo - $excesoAnterior, 2);
+
+        if ($fugaIncremental <= 0) {
+            return null;
+        }
+
+        $saldoActual  = (float) $user->challenge_savings_balance;
+        $nuevoSaldo   = max(0.0, round($saldoActual - $fugaIncremental, 2));
+
+        $user->update(['challenge_savings_balance' => $nuevoSaldo]);
+
+        Log::info("Leaky bucket user {$user->id}: fuga={$fugaIncremental}, balance {$saldoActual} -> {$nuevoSaldo}");
+
+        return [
+            'fuga_aplicada'            => $fugaIncremental,
+            'techo_diario'             => round($techoDiario, 2),
+            'gastos_hoy'               => round($gastosHoy, 2),
+            'ahorro_protegido_actual'  => $nuevoSaldo,
+        ];
     }
 
     /**

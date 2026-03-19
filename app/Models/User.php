@@ -18,11 +18,19 @@ class User extends Authenticatable
         'country_code',
         'phone',
         'fcm_token',
+        'savings_mode_pct',
+        'has_active_challenge',
+        'challenge_savings_balance',
     ];
 
     protected $hidden = ['password', 'remember_token'];
 
-    protected $casts = ['password' => 'hashed'];
+    protected $casts = [
+        'password'                  => 'hashed',
+        'has_active_challenge'      => 'boolean',
+        'savings_mode_pct'          => 'float',
+        'challenge_savings_balance' => 'float',
+    ];
 
     // Tus relaciones existentes
     public function movements(): HasMany
@@ -48,5 +56,10 @@ class User extends Authenticatable
     public function goalContributions(): HasMany
     {
         return $this->hasMany(GoalContribution::class);
+    }
+
+    public function fiscalProfiles(): HasMany
+    {
+        return $this->hasMany(FiscalProfile::class);
     }
 }

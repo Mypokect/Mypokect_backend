@@ -5,11 +5,13 @@ namespace App\Http\Controllers\Auth;
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -19,18 +21,11 @@ class AuthController extends Controller
 
     /**
      * Login.
-     *
-     * Authenticates user with phone number and 4-digit PIN. Returns a Sanctum bearer token.
-     * Implements per-account rate limiting: 5 failed attempts locks the account for 10 minutes.
-     *
-     * @bodyParam phone string required User's phone number. Example: 3001234567
-     * @bodyParam password string required 4-digit PIN. Example: 1234
-     * @unauthenticated
      */
     public function login(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'phone' => 'required|string|max:20',
+            'phone'    => 'required|string|max:20',
             'password' => 'required|string',
         ]);
 
@@ -38,64 +33,41 @@ class AuthController extends Controller
             return $this->validationErrorResponse($validated->errors(), 'Datos de inicio de sesión inválidos');
         }
 
-        // Rate limiting per account (phone number), not just per IP
         $throttleKey = 'login_attempt:' . Str::lower($request->input('phone'));
 
         if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
             $seconds = RateLimiter::availableIn($throttleKey);
-
-            return $this->errorResponse(
-                "Cuenta bloqueada temporalmente. Intente en {$seconds} segundos.",
-                429
-            );
+            return $this->errorResponse("Cuenta bloqueada temporalmente. Intente en {$seconds} segundos.", 429);
         }
 
         try {
             $user = User::where('phone', $request->input('phone'))->first();
 
-            // Unified error: same message for "user not found" and "wrong password"
-            // to prevent user enumeration attacks
             if (! $user || ! Hash::check($request->input('password'), $user->password)) {
-                RateLimiter::hit($throttleKey, 600); // Lock for 10 minutes after 5 failures
-
+                RateLimiter::hit($throttleKey, 600);
                 return $this->errorResponse('Credenciales inválidas', 401);
             }
 
-            // Success: clear rate limiter
             RateLimiter::clear($throttleKey);
-
             $token = $user->createToken('auth_token')->plainTextToken;
 
-            return $this->successResponse([
-                'user' => $user,
-                'token' => $token,
-            ], 'Inicio de sesión exitoso');
-
+            return $this->successResponse(['user' => $user, 'token' => $token], 'Inicio de sesión exitoso');
         } catch (\Exception $e) {
             Log::error('Login error: ' . $e->getMessage());
-
             return $this->errorResponse($this->safeMessage($e));
         }
     }
 
     /**
      * Register.
-     *
-     * Creates a new user account and returns a Sanctum bearer token.
-     *
-     * @bodyParam name string required User's display name. Example: Carlos
-     * @bodyParam phone string required Phone number (unique). Example: 3001234567
-     * @bodyParam country_code string required Country dial code. Example: +57
-     * @bodyParam password string required 4-digit PIN. Example: 1234
-     * @unauthenticated
      */
     public function register(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'phone' => 'required|string|max:20|unique:users,phone',
+            'name'         => 'required|string|max:255',
+            'phone'        => 'required|string|max:20|unique:users,phone',
             'country_code' => 'required|string|max:5',
-            'password' => 'required|digits:4',
+            'password'     => 'required|digits:4',
         ]);
 
         if ($validated->fails()) {
@@ -104,22 +76,17 @@ class AuthController extends Controller
 
         try {
             $user = User::create([
-                'name' => $request->input('name'),
-                'phone' => $request->input('phone'),
+                'name'         => $request->input('name'),
+                'phone'        => $request->input('phone'),
                 'country_code' => $request->input('country_code'),
-                'password' => Hash::make($request->input('password')),
+                'password'     => Hash::make($request->input('password')),
             ]);
 
             $token = $user->createToken('auth_token')->plainTextToken;
 
-            return $this->createdResponse([
-                'user' => $user,
-                'token' => $token,
-            ], 'Usuario registrado exitosamente');
-
+            return $this->createdResponse(['user' => $user, 'token' => $token], 'Usuario registrado exitosamente');
         } catch (\Exception $e) {
             Log::error('Register error: ' . $e->getMessage());
-
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -127,79 +94,119 @@ class AuthController extends Controller
     /**
      * Get home data.
      *
-     * Returns the user's name, current balance, and financial status indicator (color + label).
+     * Accepts optional ?month=&year= query params (defaults to current month).
+     * Returns balance, status semáforo, porcentaje_ahorro, salud_financiera y flujo_neto.
      */
     public function homeData(Request $request): JsonResponse
     {
-        $user = $request->user();
+        $user  = $request->user();
+        $month = (int) $request->query('month', now()->month);
+        $year  = (int) $request->query('year',  now()->year);
 
-        // 1. Sumar Ingresos y Gastos
-        $incomes = $user->movements()->where('type', 'income')->sum('amount');
-        $expenses = $user->movements()->where('type', 'expense')->sum('amount');
+        $start = Carbon::create($year, $month, 1)->startOfMonth();
+        $end   = Carbon::create($year, $month, 1)->endOfMonth();
 
-        $balance = $incomes - $expenses;
+        $incomes  = (float) $user->movements()->where('type', 'income') ->whereBetween('created_at', [$start, $end])->sum('amount');
+        $expenses = (float) $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->sum('amount');
 
-        // 2. Lógica para definir el Estado (Semáforo)
-        // Valores por defecto (Caso: Usuario Nuevo / Sin datos)
+        $balance   = $incomes - $expenses;
+        $flujoNeto = $balance;
+
+        // ── Semáforo ──────────────────────────────────────────────────────────
         $statusLabel = 'Sin actividad';
         $statusColor = 'grey';
-        $iconType = 'neutral';
+        $iconType    = 'neutral';
 
-        // Si hay movimientos, calculamos la realidad
         if ($incomes > 0 || $expenses > 0) {
             if ($balance >= 0) {
                 $statusLabel = 'Saldo a favor';
                 $statusColor = 'green';
-                $iconType = 'up';
+                $iconType    = 'up';
             } else {
                 $statusLabel = 'Sobregirado';
                 $statusColor = 'red';
-                $iconType = 'down';
+                $iconType    = 'down';
             }
         }
 
+        // ── Porcentaje de ahorro (backend calcula, Flutter solo muestra) ──────
+        $porcentajeAhorro = 0.0;
+        if ($incomes > 0) {
+            $porcentajeAhorro = max(0.0, round(($balance / $incomes) * 100, 1));
+        }
+
+        // ── Reto de Ahorro Activo + Alcancía con Fuga ────────────────────────
+        $hasActiveChallenge    = false;
+        $ahorroReservadoMes    = 0.0;
+        $ahorroProtegidoActual = 0.0;
+        $dineroFugadoMes       = 0.0;
+        $disponibleParaVivir   = $balance;
+
+        if (Schema::hasColumn('users', 'has_active_challenge')) {
+            $hasActiveChallenge = (bool) $user->has_active_challenge;
+
+            if ($hasActiveChallenge && $user->savings_mode_pct > 0) {
+                $ahorroReservadoMes = round($incomes * (float) $user->savings_mode_pct, 2);
+
+                // challenge_savings_balance = monto real protegido tras fugas
+                $ahorroProtegidoActual = Schema::hasColumn('users', 'challenge_savings_balance')
+                    ? (float) ($user->challenge_savings_balance ?? $ahorroReservadoMes)
+                    : $ahorroReservadoMes;
+
+                $dineroFugadoMes   = max(0.0, round($ahorroReservadoMes - $ahorroProtegidoActual, 2));
+                $disponibleParaVivir = round($balance - $ahorroProtegidoActual, 2);
+            }
+        }
+
+        // ── Salud Financiera (score 0-100 + etiqueta + color) ─────────────────
+        $saludFinanciera = $this->calcularSaludFinanciera($incomes, $expenses);
+
         return $this->successResponse([
-            'name' => $user->name,
-            'balance' => $balance,
-            'status_label' => $statusLabel,
-            'status_color' => $statusColor,
-            'icon_type' => $iconType,
+            'name'                 => $user->name,
+            'balance'              => $balance,
+            'flujo_neto'           => $flujoNeto,
+            'status_label'         => $statusLabel,
+            'status_color'         => $statusColor,
+            'icon_type'            => $iconType,
+            'porcentaje_ahorro'    => $porcentajeAhorro,
+            'salud_financiera'     => $saludFinanciera,
+            // Reto de Ahorro + Alcancía con Fuga — Flutter mapea directamente
+            'has_active_challenge'    => $hasActiveChallenge,
+            'ahorro_reservado_mes'    => $ahorroReservadoMes,
+            'ahorro_protegido_actual' => $ahorroProtegidoActual,
+            'dinero_fugado_mes'       => $dineroFugadoMes,
+            'disponible_para_vivir'   => $disponibleParaVivir,
         ]);
     }
 
     /**
-     * Get financial summary.
-     *
-     * Returns current month's income, expenses, goal contributions, and top 5 tags by amount.
+     * Get financial summary (with month/year filter).
      */
     public function financialSummary(Request $request): JsonResponse
     {
-        $user = $request->user();
+        $user  = $request->user();
+        $month = (int) $request->query('month', now()->month);
+        $year  = (int) $request->query('year',  now()->year);
 
-        // Obtener el primer y último día del mes actual
-        $startOfMonth = now()->startOfMonth();
-        $endOfMonth = now()->endOfMonth();
+        $start = Carbon::create($year, $month, 1)->startOfMonth();
+        $end   = Carbon::create($year, $month, 1)->endOfMonth();
 
-        // 1. Calcular ingresos del mes actual (solo de movements)
-        $totalIncome = $user->movements()
+        $totalIncome = (float) $user->movements()
             ->where('type', 'income')
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+            ->whereBetween('created_at', [$start, $end])
             ->sum('amount');
 
-        // 2. Calcular gastos del mes actual (solo de movements, NO incluye aportes a metas)
-        $totalExpense = $user->movements()
+        $totalExpense = (float) $user->movements()
             ->where('type', 'expense')
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+            ->whereBetween('created_at', [$start, $end])
             ->sum('amount');
 
-        // 3. Calcular aportes a metas del mes actual (de goal_contributions)
-        $totalGoalContributions = $user->goalContributions()
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+        $totalGoalContributions = (float) $user->goalContributions()
+            ->whereBetween('created_at', [$start, $end])
             ->sum('amount');
 
-        // 4. Obtener top 5 etiquetas más usadas con sus montos totales (del mes actual, solo movements)
         $topTags = $user->movements()
-            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+            ->whereBetween('created_at', [$start, $end])
             ->whereNotNull('tag_id')
             ->with('tag:id,name')
             ->selectRaw('tag_id, SUM(amount) as total_amount')
@@ -212,10 +219,37 @@ class AuthController extends Controller
             });
 
         return $this->successResponse([
-            'total_income' => (float) $totalIncome,
-            'total_expense' => (float) $totalExpense,
-            'total_goal_contributions' => (float) $totalGoalContributions,
-            'top_tags' => $topTags,
+            'total_income'             => $totalIncome,
+            'total_expense'            => $totalExpense,
+            'total_goal_contributions' => $totalGoalContributions,
+            'top_tags'                 => $topTags,
         ]);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private function calcularSaludFinanciera(float $incomes, float $expenses): array
+    {
+        if ($incomes === 0.0) {
+            return ['score' => 0, 'label' => 'Sin actividad', 'descripcion' => 'Registra ingresos para ver tu salud', 'color' => 'grey'];
+        }
+
+        $ratio = $expenses / $incomes;
+
+        if ($ratio > 1.0) {
+            return ['score' => 10, 'label' => 'Crítico',    'descripcion' => 'Ajusta tus finanzas urgentemente', 'color' => 'red'];
+        }
+        if ($ratio < 0.3) {
+            return ['score' => 95, 'label' => 'Excelente',  'descripcion' => 'Tu salud financiera es óptima',    'color' => 'green'];
+        }
+        if ($ratio < 0.5) {
+            return ['score' => 85, 'label' => 'Muy Bueno',  'descripcion' => 'Estás ahorrando muy bien',         'color' => 'green'];
+        }
+        if ($ratio < 0.7) {
+            return ['score' => 70, 'label' => 'Bueno',      'descripcion' => 'Puedes mejorar tu ahorro',         'color' => 'orange'];
+        }
+
+        $score = (int) max(20, round((1 - $ratio) * 100));
+        return ['score' => $score, 'label' => 'Regular', 'descripcion' => 'Necesitas optimizar gastos', 'color' => 'orange'];
     }
 }

@@ -65,10 +65,17 @@ Route::middleware('auth:sanctum')->group(function () {
     // 5. ASISTENTES FINANCIEROS
     // Análisis de ahorro mensual (50/30/20)
     Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
+    // Guardar modo de ahorro elegido por el usuario
+    Route::post('/savings/save-plan',    [SavingsController::class, 'savePlan']);
+    // Cancelar el reto de ahorro activo
+    Route::post('/savings/cancel-plan',  [SavingsController::class, 'cancelPlan']);
 
     // 6. IMPUESTOS (RADAR Y DECLARACIÓN)
-    Route::get('/taxes/data', [TaxController::class, 'getData']);        // Datos pre-llenados
-    Route::get('/taxes/alerts', [TaxController::class, 'checkLimits']);  // Semáforo Fiscal 2026
+    Route::get('/taxes/data',          [TaxController::class, 'getData']);        // Datos pre-llenados + cálculo por defecto
+    Route::get('/taxes/alerts',        [TaxController::class, 'checkLimits']);    // Semáforo Fiscal (año ?year=)
+    Route::get('/taxes/profile',       [TaxController::class, 'getProfile']);     // Perfil fiscal del usuario
+    Route::post('/taxes/profile',      [TaxController::class, 'saveProfile']);    // Guardar / actualizar perfil
+    Route::post('/taxes/recalculate',  [TaxController::class, 'recalculate']);    // Simulador interactivo (Flutter envía params, backend calcula)
 
     // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
     Route::get('/budgets', [BudgetController::class, 'getBudgets']);
