@@ -3,8 +3,6 @@
 namespace App\Providers;
 
 use Dedoc\Scramble\Scramble;
-use Dedoc\Scramble\Support\Generator\OpenApi;
-use Dedoc\Scramble\Support\Generator\SecurityScheme;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\Gate;
 use App\Models\Reminder;
@@ -38,10 +36,12 @@ class AppServiceProvider extends ServiceProvider
         Gate::policy(Reminder::class, ReminderPolicy::class);
 
         // OpenAPI documentation (Scramble)
-        Scramble::afterOpenApiGenerated(function (OpenApi $openApi) {
-            $openApi->secure(
-                SecurityScheme::http('bearer', 'sanctum')
-            );
-        });
+        if (class_exists(Scramble::class)) {
+            Scramble::afterOpenApiGenerated(function ($openApi) {
+                $openApi->secure(
+                    \Dedoc\Scramble\Support\Generator\SecurityScheme::http('bearer', 'sanctum')
+                );
+            });
+        }
     }
 }

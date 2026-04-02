@@ -187,7 +187,36 @@ class ScheduledTransactionController extends Controller
      * Update a scheduled transaction.
      */
     public function update(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
-    { /* ... lógica de actualización ... */
+    {
+        $this->authorizeOwner($scheduledTransaction);
+
+        $validator = Validator::make($request->all(), [
+            'title' => 'sometimes|required|string|max:255',
+            'amount' => 'sometimes|required|numeric|min:0',
+            'type' => 'sometimes|required|string|in:expense,income',
+            'category' => 'sometimes|nullable|string|max:100',
+            'start_date' => 'sometimes|required|date_format:Y-m-d',
+            'recurrence_type' => 'sometimes|required|string|in:none,daily,weekly,monthly,yearly',
+            'recurrence_interval' => 'sometimes|nullable|integer|min:1',
+            'end_date' => 'sometimes|nullable|date_format:Y-m-d',
+            'reminder_days_before' => 'sometimes|nullable|integer|min:0',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationErrorResponse($validator->errors());
+        }
+
+        $data = $validator->validated();
+
+        if (isset($data['end_date']) && isset($data['start_date']) && $data['end_date'] < $data['start_date']) {
+            return $this->validationErrorResponse([
+                'end_date' => ['La fecha de fin debe ser igual o posterior a la fecha de inicio.'],
+            ]);
+        }
+
+        $scheduledTransaction->update($data);
+
+        return $this->successResponse($scheduledTransaction->fresh(), 'Transacción programada actualizada.');
     }
 
     /**
