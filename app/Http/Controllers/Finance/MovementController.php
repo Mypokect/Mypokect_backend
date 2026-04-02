@@ -12,7 +12,9 @@ use App\Models\Tag;
 use App\Services\MovementAIService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
@@ -62,6 +64,23 @@ class MovementController extends Controller
         try {
             $user = Auth::user();
 
+            // Per-user rate lock: reject if last successful save was < 2 seconds ago
+            $lockKey = "movement_save_lock_{$user->id}";
+            if (Cache::has($lockKey)) {
+                return response()->json(['message' => 'Demasiadas solicitudes. Espera un momento antes de registrar otro movimiento.'], 429);
+            }
+
+            // Idempotency check: reject identical movement within the last 5 seconds
+            $duplicate = Movement::where('user_id', $user->id)
+                ->where('amount', $request->amount)
+                ->where('description', $request->description ?? 'Movimiento')
+                ->where('created_at', '>=', Carbon::now()->subSeconds(5))
+                ->exists();
+
+            if ($duplicate) {
+                return response()->json(['message' => 'Registro duplicado detectado'], 422);
+            }
+
             DB::beginTransaction();
 
             // Handle tag: find or create by name
@@ -92,6 +111,9 @@ class MovementController extends Controller
             $movement->load('tag');
 
             DB::commit();
+
+            // Set per-user lock for 2 seconds after successful save
+            Cache::put($lockKey, true, now()->addSeconds(2));
 
             Log::info("Movement {$movement->id} created successfully by user {$user->id}");
 

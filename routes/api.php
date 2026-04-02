@@ -36,7 +36,7 @@ Route::post('/register', [AuthController::class, 'register'])
     ->middleware('throttle:10,1');
 
 // --- RUTAS PROTEGIDAS (Sanctum) ---
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
     // 1. HOME & USUARIO
     Route::get('/home-data', [AuthController::class, 'homeData']);
@@ -48,13 +48,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // IA de Voz para Movimientos (Entiende gasto/ingreso + monto + metodo de pago)
     Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
-        ->middleware('throttle:20,1');
+        ->middleware('throttle:10,1');
 
     // 3. ETIQUETAS (TAGS)
     Route::get('/tags', [TagController::class, 'index']);
     Route::post('/tags/create', [TagController::class, 'store']);
     Route::post('/tags/suggestion', [TagController::class, 'suggest'])
-        ->middleware('throttle:20,1');
+        ->middleware('throttle:10,1');
 
     // 4. CALENDARIO & PROGRAMADOS
     Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
@@ -75,7 +75,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/taxes/alerts',        [TaxController::class, 'checkLimits']);    // Semáforo Fiscal (año ?year=)
     Route::get('/taxes/profile',       [TaxController::class, 'getProfile']);     // Perfil fiscal del usuario
     Route::post('/taxes/profile',      [TaxController::class, 'saveProfile']);    // Guardar / actualizar perfil
-    Route::post('/taxes/recalculate',  [TaxController::class, 'recalculate']);    // Simulador interactivo (Flutter envía params, backend calcula)
+    Route::post('/taxes/recalculate',  [TaxController::class, 'recalculate'])->middleware('throttle:10,1');    // Simulador interactivo (Flutter envía params, backend calcula)
 
     // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
     Route::get('/budgets', [BudgetController::class, 'getBudgets']);
@@ -91,7 +91,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/budgets/{budget}', [BudgetController::class, 'deleteBudget']);
     Route::post('/budgets/{budget}/validate', [BudgetController::class, 'validateBudget']);
     Route::get('/budgets/{budget}/spending', [BudgetController::class, 'getSpending']);
-    Route::get('/budgets/{budget}/suggested-tags', [BudgetController::class, 'getSuggestedTags'])->middleware('throttle:20,1');
+    Route::get('/budgets/{budget}/suggested-tags', [BudgetController::class, 'getSuggestedTags'])->middleware('throttle:10,1');
     Route::delete('/budgets/{budget}/suggested-tags-cache', [BudgetController::class, 'clearSuggestedTagsCache']);
     Route::post('/budgets/{budget}/apply-ai-tags', [BudgetController::class, 'applyAITags']);
     Route::post('/budgets/{budget}/move-movement', [BudgetController::class, 'moveMovement']);
@@ -104,7 +104,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/budgets/{budget}/categories/{category}', [BudgetController::class, 'deleteCategory']);
 
     // Voz específica para crear Presupuestos (No confundir con la de movimientos)
-    Route::post('/process-voice', [BudgetController::class, 'processVoiceCommand']);
+    Route::post('/process-voice', [BudgetController::class, 'processVoiceCommand'])
+        ->middleware('throttle:10,1');
 
     // 8. METAS DE AHORRO (Saving Goals)
     Route::get('/saving-goals', [SavingGoalController::class, 'index']);
