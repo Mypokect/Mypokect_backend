@@ -268,6 +268,7 @@ class TaxController extends Controller
                 'ingresos_desglosados'    => $ingresosDesglosados,
                 'ingresos_para_auditoria' => $ingresosParaAuditoria,
                 'movimientos_ingreso'     => $ingresosParaAuditoria, // alias para el módulo de auditoría
+                'movimientos_auditados'   => array_map(fn($m) => array_merge($m, ['bolsa_actual' => $m['bolsa_asignada']]), $ingresosParaAuditoria),
                 // metadata: topes pre-formateados para que Flutter no necesite saber qué es una UVT
                 'metadata' => [
                     'topes' => [
@@ -301,7 +302,7 @@ class TaxController extends Controller
     {
         try {
             $data = $request->validate([
-                'tipo_contribuyente'      => ['required', 'string', 'in:empleado,independiente,comerciante,rentista'],
+                'tipo_contribuyente'      => ['nullable', 'string', 'in:empleado,independiente,comerciante,rentista'],
                 'ingresos_totales'        => ['required', 'numeric', 'min:0'],
                 'patrimonio'              => ['nullable', 'numeric', 'min:0'],
                 'retenciones'             => ['nullable', 'numeric', 'min:0'],
@@ -329,8 +330,22 @@ class TaxController extends Controller
 
             $year       = (int) ($data['year'] ?? Carbon::now()->year);
             $uvt        = UvtHelper::valorUvt($year);
-            $tipo       = $data['tipo_contribuyente'];
             $ingresos   = (float) $data['ingresos_totales'];
+
+            // Auto-deducción del tipo de contribuyente desde la distribución de bolsas
+            $laboral    = (float) ($data['ingresos_laboral']    ?? 0);
+            $honorarios = (float) ($data['ingresos_honorarios'] ?? 0);
+            $capital    = (float) ($data['ingresos_capital']    ?? 0);
+            $comercial  = (float) ($data['ingresos_comercial']  ?? 0);
+            if (! empty($data['tipo_contribuyente'])) {
+                $tipo = $data['tipo_contribuyente'];
+            } else {
+                $bolsaMax = max($laboral, $honorarios, $capital, $comercial);
+                if ($bolsaMax == 0 || $bolsaMax == $laboral) $tipo = 'empleado';
+                elseif ($bolsaMax == $honorarios)            $tipo = 'independiente';
+                elseif ($bolsaMax == $comercial)             $tipo = 'comerciante';
+                else                                         $tipo = 'rentista';
+            }
             $patrimonio = (float) ($data['patrimonio']    ?? 0);
             $retenciones= (float) ($data['retenciones']   ?? 0);
             $numDep     = (int)   ($data['num_dependientes'] ?? 0);
@@ -377,13 +392,14 @@ class TaxController extends Controller
             // ── Auditoría: reclasificaciones manuales de movimientos reales ────────
             $asignaciones = $data['asignaciones_auditoria'] ?? [];
             $conteoPorBolsaAuditoria = ['laboral' => 0, 'honorarios' => 0, 'capital' => 0, 'comercial' => 0, 'otros' => 0];
+            $movimientosAuditados = [];
             if (! empty($asignaciones)) {
                 $idMap = collect($asignaciones)->keyBy('id');
                 $movimientos = Auth::user()->movements()
                     ->where('type', 'income')
                     ->whereIn('id', $idMap->keys()->all())
                     ->whereBetween('created_at', [$start, $end])
-                    ->get(['id', 'amount']);
+                    ->get(['id', 'amount', 'description', 'created_at']);
 
                 $sumasPorBolsa = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
                 foreach ($movimientos as $mov) {
@@ -392,6 +408,13 @@ class TaxController extends Controller
                         $sumasPorBolsa[$nuevaBolsa] += (float) $mov->amount;
                         $conteoPorBolsaAuditoria[$nuevaBolsa]++;
                     }
+                    $movimientosAuditados[] = [
+                        'id'          => $mov->id,
+                        'description' => $mov->description ?? '',
+                        'amount'      => (float) $mov->amount,
+                        'date'        => $mov->created_at->toDateString(),
+                        'bolsa_actual'=> $nuevaBolsa,
+                    ];
                 }
 
                 // Sobreescribe el desglose con los montos reales reclasificados
@@ -443,7 +466,9 @@ class TaxController extends Controller
             $resultado['base_renta_exenta_25'] = $tieneBolsas
                 ? round($ingresosLaboral + $ingresosHonorarios)
                 : null;
-            $resultado['conteo_por_bolsa'] = ! empty($asignaciones) ? $conteoPorBolsaAuditoria : null;
+            $resultado['conteo_por_bolsa']    = ! empty($asignaciones) ? $conteoPorBolsaAuditoria : null;
+            $resultado['movimientos_auditados'] = $movimientosAuditados;
+            $resultado['tipo_contribuyente_deducido'] = $tipo;
 
             // ── Radar Fiscal simulado — valores del request, sin tocar la BD ──────────
             $consumoTarjetas = round($ingresos * 0.3, 2);
@@ -876,6 +901,53 @@ class TaxController extends Controller
             'texto_resumen'              => $textoResumen,
         ];
 
+        // ── Memoria de Cálculo (Hoja de Trabajo DIAN) ─────────────────────
+        // Tarifa marginal aplicada según Art 241
+        $tarifaPct  = $this->getTarifaMarginal($baseUVT);
+        $tarifaTexto = $baseUVT <= 1090
+            ? 'Base ≤ 1.090 UVT — tarifa 0% (exento)'
+            : number_format($tarifaPct * 100, 0) . '% sobre el excedente de '
+              . number_format($this->getLimiteInferiorUVT($baseUVT), 0) . ' UVT (Art 241)';
+
+        $lineas = [];
+        $lineas[] = ['concepto' => 'Ingresos Brutos (suma de bolsas)',       'monto' => round($ingresosTotales),          'tipo' => 'suma'];
+        if ($ingresosNoConstitutivos > 0)
+            $lineas[] = ['concepto' => '(-) Seguridad Social — EPS + Pensión',   'monto' => round($ingresosNoConstitutivos),  'tipo' => 'resta'];
+        if ($costosGastos > 0)
+            $lineas[] = ['concepto' => '(-) Costos y Gastos de la actividad',    'monto' => round($costosGastos),             'tipo' => 'resta'];
+        $lineas[] = ['concepto' => '(=) Renta Líquida Inicial',                  'monto' => round($ingresosNetos),            'tipo' => 'subtotal'];
+        if ($dSalud > 0)
+            $lineas[] = ['concepto' => '(-) Medicina Prepagada (Art 387)',        'monto' => round($dSalud),                   'tipo' => 'resta'];
+        if ($dVivienda > 0)
+            $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)', 'monto' => round($dVivienda),          'tipo' => 'resta'];
+        if ($aportesVoluntarios > 0)
+            $lineas[] = ['concepto' => '(-) Aportes Voluntarios Pensión',         'monto' => round($aportesVoluntarios),       'tipo' => 'resta'];
+        if ($rentaExenta25 > 0)
+            $lineas[] = ['concepto' => '(-) Renta Exenta 25% Laboral (Art 206-10)', 'monto' => round($rentaExenta25),         'tipo' => 'resta'];
+        if ($deducDependientesExtra > 0)
+            $lineas[] = ['concepto' => '(-) Dependientes a cargo (Art 387)',      'monto' => round($deducDependientesExtra),   'tipo' => 'resta_extra'];
+        if ($deduc1pctFEAplicada > 0)
+            $lineas[] = ['concepto' => '(-) 1% Facturas Electrónicas (Art 258)',  'monto' => round($deduc1pctFEAplicada),      'tipo' => 'resta_extra'];
+        $lineas[] = ['concepto' => '(=) Base Gravable Final',                     'monto' => round($baseGravable),             'tipo' => 'subtotal_final'];
+        $lineas[] = ['concepto' => 'Impuesto — ' . $tarifaTexto,                  'monto' => $impuestoBruto,                   'tipo' => 'impuesto'];
+        if ($retenciones > 0)
+            $lineas[] = ['concepto' => '(-) Retenciones en la Fuente',            'monto' => round($retenciones),              'tipo' => 'resta'];
+        $lineas[] = ['concepto' => '(=) TOTAL A PAGAR',                           'monto' => round($impuestoAPagar),           'tipo' => 'total'];
+
+        $memoriaCalculo = [
+            'lineas'               => $lineas,
+            'tarifa_pct'           => $tarifaPct,
+            'tarifa_texto'         => $tarifaTexto,
+            'alerta_tope_40'       => $superoTope ? [
+                'monto_solicitado' => round($beneficiosSujetosAlTope),
+                'monto_aplicado'   => round($beneficiosAplicadosSujetos),
+                'recorte'          => round($beneficiosSujetosAlTope - $beneficiosAplicadosSujetos),
+                'texto'            => '⚠️ La ley limitó tus descuentos de '
+                    . $fmtM($beneficiosSujetosAlTope) . ' a ' . $fmtM($beneficiosAplicadosSujetos)
+                    . ' por superar el 40% de tus ingresos (Art 336 E.T.).',
+            ] : null,
+        ];
+
         return [
             // Campos que los widgets de Flutter necesitan (en snake_case, Flutter mapea)
             'ingresos_brutos'              => round($ingresosTotales),
@@ -904,7 +976,34 @@ class TaxController extends Controller
             'status_color'                 => $statusData['color'],
             'mensajes_explicativos'        => $mensajes,
             'depuracion_paso_a_paso'       => $depuracion,
+            'memoria_calculo'              => $memoriaCalculo,
         ];
+    }
+
+    /** Tarifa marginal Art 241 para mostrar en la memoria de cálculo */
+    private function getTarifaMarginal(float $baseUvt): float
+    {
+        if ($baseUvt <= 1090)  return 0.0;
+        if ($baseUvt <= 1700)  return 0.19;
+        if ($baseUvt <= 3400)  return 0.28;
+        if ($baseUvt <= 4100)  return 0.33;
+        if ($baseUvt <= 8670)  return 0.36;
+        if ($baseUvt <= 18970) return 0.38;
+        if ($baseUvt <= 31000) return 0.40;
+        return 0.42;
+    }
+
+    /** Límite inferior del rango UVT para el texto de la tarifa */
+    private function getLimiteInferiorUVT(float $baseUvt): float
+    {
+        if ($baseUvt <= 1090)  return 0;
+        if ($baseUvt <= 1700)  return 1090;
+        if ($baseUvt <= 3400)  return 1700;
+        if ($baseUvt <= 4100)  return 3400;
+        if ($baseUvt <= 8670)  return 4100;
+        if ($baseUvt <= 18970) return 8670;
+        if ($baseUvt <= 31000) return 18970;
+        return 31000;
     }
 
     /** Tabla progresiva Art 241 E.T. — 8 rangos */
