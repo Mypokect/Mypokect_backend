@@ -31,6 +31,7 @@ class CreateMovementRequest extends FormRequest
             'tag_name' => 'nullable|string|max:50',
             'has_invoice'         => 'nullable|boolean',
             'is_business_expense' => 'nullable|boolean',
+            'rent_type'           => 'nullable|string|in:laboral,honorarios,capital,comercial,otros',
         ];
     }
 

@@ -75,6 +75,25 @@ class TaxController extends Controller
                 ->whereBetween('created_at', [$start, $end])
                 ->sum('amount');
 
+            // ── Desglose por bolsa de renta (rent_type) ───────────────────────
+            $ingresosPorBolsa = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
+            if (Schema::hasColumn('movements', 'rent_type')) {
+                $bolsas = $user->movements()
+                    ->where('type', 'income')
+                    ->whereNotNull('rent_type')
+                    ->whereBetween('created_at', [$start, $end])
+                    ->selectRaw('rent_type, SUM(amount) as total')
+                    ->groupBy('rent_type')
+                    ->pluck('total', 'rent_type')
+                    ->toArray();
+                foreach ($bolsas as $bolsa => $total) {
+                    if (array_key_exists($bolsa, $ingresosPorBolsa)) {
+                        $ingresosPorBolsa[$bolsa] = (float) $total;
+                    }
+                }
+                // Ingresos sin clasificar van a 'otros' implícitamente en el total
+            }
+
             $gastoConFe = (float) $user->movements()
                 ->where('type', 'expense')
                 ->where('has_invoice', true)
@@ -197,6 +216,7 @@ class TaxController extends Controller
                 'retenciones'           => (float) ($profile?->retenciones    ?? 0),
                 'has_profile'           => $profile !== null,
                 'resultado_por_defecto' => $resultadoPorDefecto,
+                'ingresos_por_bolsa'    => $ingresosPorBolsa,
                 // metadata: topes pre-formateados para que Flutter no necesite saber qué es una UVT
                 'metadata' => [
                     'topes' => [

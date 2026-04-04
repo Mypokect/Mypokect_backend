@@ -24,6 +24,7 @@ class Movement extends Model
         'payment_method',
         'has_invoice',
         'is_business_expense',
+        'rent_type',
     ];
 
     /**

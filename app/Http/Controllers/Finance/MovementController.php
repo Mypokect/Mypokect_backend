@@ -97,14 +97,15 @@ class MovementController extends Controller
 
             // Create movement
             $movement = Movement::create([
-                'type' => $request->type,
-                'amount' => $request->amount,
-                'description' => $request->description ?? 'Movimiento',
-                'payment_method' => $request->payment_method,
+                'type'                => $request->type,
+                'amount'              => $request->amount,
+                'description'         => $request->description ?? 'Movimiento',
+                'payment_method'      => $request->payment_method,
                 'has_invoice'         => $request->has_invoice ?? false,
                 'is_business_expense' => $request->is_business_expense ?? false,
-                'user_id' => $user->id,
-                'tag_id' => $tagId,
+                'rent_type'           => $request->type === 'income' ? ($request->rent_type ?? null) : null,
+                'user_id'             => $user->id,
+                'tag_id'              => $tagId,
             ]);
 
             // Load tag relationship for response
