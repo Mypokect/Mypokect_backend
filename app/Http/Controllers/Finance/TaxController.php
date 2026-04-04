@@ -6,6 +6,7 @@ use App\Helpers\UvtHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\FiscalProfile;
+use App\Models\Movement;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -92,6 +93,53 @@ class TaxController extends Controller
                     }
                 }
                 // Ingresos sin clasificar van a 'otros' implícitamente en el total
+            }
+
+            // ── Desglose heurístico por nombre de Tag (sin tocar la tabla movements) ──
+            $ingresosDesglosados = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
+            $keywordsMap = [
+                'laboral'    => ['sueldo', 'nómina', 'nomina', 'salario', 'quincena'],
+                'honorarios' => ['honorarios', 'servicios', 'freelance'],
+                'capital'    => ['arriendo', 'alquiler', 'intereses', 'dividendos'],
+                'comercial'  => ['venta', 'negocio', 'local', 'mercancía', 'mercancia'],
+            ];
+            $incomeMovements = $user->movements()
+                ->with('tag')
+                ->where('type', 'income')
+                ->whereBetween('created_at', [$start, $end])
+                ->get();
+            $ingresosParaAuditoria = [];
+            foreach ($incomeMovements as $mov) {
+                $tagName         = strtolower($mov->tag?->name ?? '');
+                $clasificado     = false;
+                $bolsaMovimiento = 'otros';
+                foreach ($keywordsMap as $bolsa => $keywords) {
+                    foreach ($keywords as $kw) {
+                        if (str_contains($tagName, $kw)) {
+                            $ingresosDesglosados[$bolsa] += (float) $mov->amount;
+                            $bolsaMovimiento = $bolsa;
+                            $clasificado     = true;
+                            break 2;
+                        }
+                    }
+                }
+                if (! $clasificado) {
+                    $ingresosDesglosados['otros'] += (float) $mov->amount;
+                }
+                $ingresosParaAuditoria[] = [
+                    'id'             => $mov->id,
+                    'description'    => $mov->description ?? '',
+                    'amount'         => (float) $mov->amount,
+                    'date'           => $mov->created_at->toDateString(),
+                    'bolsa_asignada' => $bolsaMovimiento,
+                ];
+            }
+
+            $conteoPorBolsa = ['laboral' => 0, 'honorarios' => 0, 'capital' => 0, 'comercial' => 0, 'otros' => 0];
+            foreach ($ingresosParaAuditoria as $auditItem) {
+                if (array_key_exists($auditItem['bolsa_asignada'], $conteoPorBolsa)) {
+                    $conteoPorBolsa[$auditItem['bolsa_asignada']]++;
+                }
             }
 
             $gastoConFe = (float) $user->movements()
@@ -216,7 +264,10 @@ class TaxController extends Controller
                 'retenciones'           => (float) ($profile?->retenciones    ?? 0),
                 'has_profile'           => $profile !== null,
                 'resultado_por_defecto' => $resultadoPorDefecto,
-                'ingresos_por_bolsa'    => $ingresosPorBolsa,
+                'ingresos_por_bolsa'      => $ingresosPorBolsa,
+                'ingresos_desglosados'    => $ingresosDesglosados,
+                'ingresos_para_auditoria' => $ingresosParaAuditoria,
+                'movimientos_ingreso'     => $ingresosParaAuditoria, // alias para el módulo de auditoría
                 // metadata: topes pre-formateados para que Flutter no necesite saber qué es una UVT
                 'metadata' => [
                     'topes' => [
@@ -225,8 +276,9 @@ class TaxController extends Controller
                         'deduccion_dependiente'   => '$' . number_format(round(72   * $uvt / 1_000_000, 1), 1, '.', '') . 'M/dep.',
                         'obligacion_declarar'     => '$' . number_format(round(1400 * $uvt / 1_000_000, 1), 1, '.', '') . 'M',
                     ],
-                    'uvt_valor' => $uvt,
-                    'uvt_año'   => $year,
+                    'uvt_valor'        => $uvt,
+                    'uvt_año'          => $year,
+                    'conteo_por_bolsa' => $conteoPorBolsa,
                 ],
             ]);
 
@@ -249,20 +301,30 @@ class TaxController extends Controller
     {
         try {
             $data = $request->validate([
-                'tipo_contribuyente'  => ['required', 'string', 'in:empleado,independiente,comerciante,rentista'],
-                'ingresos_totales'    => ['required', 'numeric', 'min:0'],
-                'patrimonio'          => ['nullable', 'numeric', 'min:0'],
-                'retenciones'         => ['nullable', 'numeric', 'min:0'],
-                'tiene_eps'           => ['nullable', 'boolean'],
-                'tiene_pension'       => ['nullable', 'boolean'],
-                'tiene_prepagada'     => ['nullable', 'boolean'],
-                'tiene_vivienda'      => ['nullable', 'boolean'],
-                'eps_anual'           => ['nullable', 'numeric', 'min:0'],
-                'pension_anual'       => ['nullable', 'numeric', 'min:0'],
-                'prepagada_anual'     => ['nullable', 'numeric', 'min:0'],
-                'vivienda_anual'      => ['nullable', 'numeric', 'min:0'],
-                'num_dependientes'    => ['nullable', 'integer', 'min:0', 'max:20'],
-                'year'                => ['nullable', 'integer', 'min:2020', 'max:2100'],
+                'tipo_contribuyente'      => ['required', 'string', 'in:empleado,independiente,comerciante,rentista'],
+                'ingresos_totales'        => ['required', 'numeric', 'min:0'],
+                'patrimonio'              => ['nullable', 'numeric', 'min:0'],
+                'retenciones'             => ['nullable', 'numeric', 'min:0'],
+                'tiene_eps'               => ['nullable', 'boolean'],
+                'tiene_pension'           => ['nullable', 'boolean'],
+                'tiene_prepagada'         => ['nullable', 'boolean'],
+                'tiene_vivienda'          => ['nullable', 'boolean'],
+                'eps_anual'               => ['nullable', 'numeric', 'min:0'],
+                'pension_anual'           => ['nullable', 'numeric', 'min:0'],
+                'prepagada_anual'         => ['nullable', 'numeric', 'min:0'],
+                'vivienda_anual'          => ['nullable', 'numeric', 'min:0'],
+                'num_dependientes'        => ['nullable', 'integer', 'min:0', 'max:20'],
+                'year'                    => ['nullable', 'integer', 'min:2020', 'max:2100'],
+                // Desglose por cédula (opcional) — si se envían, la renta exenta 25% solo aplica a laboral+honorarios
+                'ingresos_laboral'        => ['nullable', 'numeric', 'min:0'],
+                'ingresos_honorarios'     => ['nullable', 'numeric', 'min:0'],
+                'ingresos_capital'        => ['nullable', 'numeric', 'min:0'],
+                'ingresos_comercial'      => ['nullable', 'numeric', 'min:0'],
+                // Auditoría: array de reclasificaciones [{'id': 123, 'nueva_bolsa': 'comercial'}, ...]
+                'asignaciones_auditoria'              => ['nullable', 'array'],
+                'asignaciones_auditoria.*.id'         => ['required_with:asignaciones_auditoria', 'integer'],
+                'asignaciones_auditoria.*.nueva_bolsa'=> ['required_with:asignaciones_auditoria', 'string',
+                                                          'in:laboral,honorarios,capital,comercial,otros'],
             ]);
 
             $year       = (int) ($data['year'] ?? Carbon::now()->year);
@@ -312,25 +374,76 @@ class TaxController extends Controller
 
             $deduccion1pctFE = round($gastosDeduciblesGenerales * 0.01, 2);
 
+            // ── Auditoría: reclasificaciones manuales de movimientos reales ────────
+            $asignaciones = $data['asignaciones_auditoria'] ?? [];
+            $conteoPorBolsaAuditoria = ['laboral' => 0, 'honorarios' => 0, 'capital' => 0, 'comercial' => 0, 'otros' => 0];
+            if (! empty($asignaciones)) {
+                $idMap = collect($asignaciones)->keyBy('id');
+                $movimientos = Auth::user()->movements()
+                    ->where('type', 'income')
+                    ->whereIn('id', $idMap->keys()->all())
+                    ->whereBetween('created_at', [$start, $end])
+                    ->get(['id', 'amount']);
+
+                $sumasPorBolsa = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
+                foreach ($movimientos as $mov) {
+                    $nuevaBolsa = $idMap[(string) $mov->id]['nueva_bolsa'] ?? 'otros';
+                    if (array_key_exists($nuevaBolsa, $sumasPorBolsa)) {
+                        $sumasPorBolsa[$nuevaBolsa] += (float) $mov->amount;
+                        $conteoPorBolsaAuditoria[$nuevaBolsa]++;
+                    }
+                }
+
+                // Sobreescribe el desglose con los montos reales reclasificados
+                $data['ingresos_laboral']    = $sumasPorBolsa['laboral'];
+                $data['ingresos_honorarios'] = $sumasPorBolsa['honorarios'];
+                $data['ingresos_capital']    = $sumasPorBolsa['capital'];
+                $data['ingresos_comercial']  = $sumasPorBolsa['comercial'];
+                // Recalcula total real desde los movimientos auditados
+                $ingresos = array_sum($sumasPorBolsa);
+            }
+
+            // ── Desglose por cédula (opcional) ──────────────────────────────────────
+            $ingresosLaboral    = (float) ($data['ingresos_laboral']    ?? 0);
+            $ingresosHonorarios = (float) ($data['ingresos_honorarios'] ?? 0);
+            $ingresosCapital    = (float) ($data['ingresos_capital']    ?? 0);
+            $ingresosComercial  = (float) ($data['ingresos_comercial']  ?? 0);
+            $tieneBolsas = ($ingresosLaboral + $ingresosHonorarios + $ingresosCapital + $ingresosComercial) > 0;
+            // Si el usuario envió desglose, la renta exenta 25% se limita a laboral+honorarios (Art 206-10)
+            $ingresosSujetosRenta25 = $tieneBolsas ? ($ingresosLaboral + $ingresosHonorarios) : -1.0;
+
             $resultado = $this->calcularImpuesto(
-                ingresosTotales:         $ingresos,
-                ingresosNoConstitutivos: $segSocial,
-                deducVivienda:           $deducVivienda,
-                deducSaludPrep:          $deducSalud,
-                numeroDependientes:      $numDep,
-                aportesVoluntarios:      0.0,
-                costosGastos:            $costosGastos,
-                aplicarRentaExenta25:    $aplicarRenta25,
-                retenciones:             $retenciones,
-                patrimonio:              $patrimonio,
-                segSocialParaDisplay:    $segSocial,
-                deduccion1pctFE:         $deduccion1pctFE,
-                uvt:                     $uvt,
+                ingresosTotales:           $ingresos,
+                ingresosNoConstitutivos:   $segSocial,
+                deducVivienda:             $deducVivienda,
+                deducSaludPrep:            $deducSalud,
+                numeroDependientes:        $numDep,
+                aportesVoluntarios:        0.0,
+                costosGastos:              $costosGastos,
+                aplicarRentaExenta25:      $aplicarRenta25,
+                retenciones:               $retenciones,
+                patrimonio:                $patrimonio,
+                segSocialParaDisplay:      $segSocial,
+                deduccion1pctFE:           $deduccion1pctFE,
+                uvt:                       $uvt,
+                ingresosSujetosRentaExenta:$ingresosSujetosRenta25,
             );
 
             // Beneficios por compras — Flutter los muestra en la sección Ley 2277
             $resultado['deduccion_compras_generales'] = $deduccion1pctFE;
             $resultado['costos_gastos_actividad']     = $costosGastos;
+
+            // Desglose de cédulas (para que Flutter muestre la nota de 25% solo en laboral)
+            $resultado['ingresos_desglosados'] = $tieneBolsas ? [
+                'laboral'    => $ingresosLaboral,
+                'honorarios' => $ingresosHonorarios,
+                'capital'    => $ingresosCapital,
+                'comercial'  => $ingresosComercial,
+            ] : null;
+            $resultado['base_renta_exenta_25'] = $tieneBolsas
+                ? round($ingresosLaboral + $ingresosHonorarios)
+                : null;
+            $resultado['conteo_por_bolsa'] = ! empty($asignaciones) ? $conteoPorBolsaAuditoria : null;
 
             // ── Radar Fiscal simulado — valores del request, sin tocar la BD ──────────
             $consumoTarjetas = round($ingresos * 0.3, 2);
@@ -400,6 +513,136 @@ class TaxController extends Controller
 
         } catch (\Throwable $e) {
             Log::error('Tax recalculate error: ' . $e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
+
+    // ── Auditoría Cedular ─────────────────────────────────────────────────────
+
+    /**
+     * GET /taxes/cedular-movements
+     *
+     * Retorna los movimientos de ingreso del año agrupados por bolsa cedular
+     * (laboral, honorarios, capital, comercial). Usa rent_type si está disponible,
+     * y como fallback clasifica heurísticamente por el nombre del tag.
+     */
+    public function getCedularMovements(Request $request): JsonResponse
+    {
+        try {
+            $user  = Auth::user();
+            $year  = (int) $request->query('year', Carbon::now()->year);
+            $start = Carbon::create($year)->startOfYear();
+            $end   = Carbon::create($year)->endOfYear();
+
+            $hasRentType = Schema::hasColumn('movements', 'rent_type');
+
+            $keywordsMap = [
+                'laboral'    => ['sueldo', 'nómina', 'nomina', 'salario', 'quincena'],
+                'honorarios' => ['honorarios', 'servicios', 'freelance'],
+                'capital'    => ['arriendo', 'alquiler', 'intereses', 'dividendos'],
+                'comercial'  => ['venta', 'negocio', 'local', 'mercancía', 'mercancia'],
+            ];
+
+            $incomeMovements = $user->movements()
+                ->with('tag')
+                ->where('type', 'income')
+                ->whereBetween('created_at', [$start, $end])
+                ->orderByDesc('created_at')
+                ->get();
+
+            $grouped = [
+                'laboral'    => ['movimientos' => [], 'total' => 0.0],
+                'honorarios' => ['movimientos' => [], 'total' => 0.0],
+                'capital'    => ['movimientos' => [], 'total' => 0.0],
+                'comercial'  => ['movimientos' => [], 'total' => 0.0],
+                'otros'      => ['movimientos' => [], 'total' => 0.0],
+            ];
+
+            foreach ($incomeMovements as $mov) {
+                // 1. Prioridad: rent_type guardado en BD
+                $bolsa = null;
+                if ($hasRentType && ! empty($mov->rent_type) && array_key_exists($mov->rent_type, $grouped)) {
+                    $bolsa = $mov->rent_type;
+                }
+
+                // 2. Fallback heurístico por tag
+                if ($bolsa === null) {
+                    $tagName = strtolower($mov->tag?->name ?? '');
+                    foreach ($keywordsMap as $key => $keywords) {
+                        foreach ($keywords as $kw) {
+                            if (str_contains($tagName, $kw)) {
+                                $bolsa = $key;
+                                break 2;
+                            }
+                        }
+                    }
+                }
+
+                $bolsa ??= 'otros';
+
+                $entry = [
+                    'id'          => $mov->id,
+                    'description' => $mov->description ?? '',
+                    'amount'      => (float) $mov->amount,
+                    'date'        => $mov->created_at->toDateString(),
+                    'category'    => $bolsa,
+                    'tag'         => $mov->tag?->name,
+                ];
+
+                $grouped[$bolsa]['movimientos'][] = $entry;
+                $grouped[$bolsa]['total']         += (float) $mov->amount;
+            }
+
+            return $this->successResponse($grouped);
+
+        } catch (\Throwable $e) {
+            Log::error('Tax getCedularMovements error: ' . $e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
+
+    /**
+     * POST /taxes/move-cedular
+     *
+     * Reclasifica un movimiento de ingreso a otra bolsa cedular guardando
+     * el campo rent_type en la BD. Retorna los datos actualizados de cédulas.
+     *
+     * Body: { "movement_id": 123, "new_category": "comercial" }
+     */
+    public function moveCedularMovement(Request $request): JsonResponse
+    {
+        try {
+            $data = $request->validate([
+                'movement_id'  => ['required', 'integer'],
+                'new_category' => ['required', 'string', 'in:laboral,honorarios,capital,comercial,otros'],
+            ]);
+
+            $user       = Auth::user();
+            $movementId = (int) $data['movement_id'];
+            $newCategory= $data['new_category'];
+
+            // Verificar que el movimiento pertenece al usuario autenticado
+            $movement = Movement::where('id', $movementId)
+                ->where('user_id', $user->id)
+                ->where('type', 'income')
+                ->firstOrFail();
+
+            // Persistir la reclasificación si la columna existe
+            if (Schema::hasColumn('movements', 'rent_type')) {
+                $movement->rent_type = $newCategory;
+                $movement->save();
+            }
+
+            return $this->successResponse([
+                'movement_id'  => $movementId,
+                'new_category' => $newCategory,
+                'updated'      => true,
+            ], 'Movimiento reclasificado correctamente.');
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return $this->errorResponse('Movimiento no encontrado o no pertenece a tu cuenta.', 404);
+        } catch (\Throwable $e) {
+            Log::error('Tax moveCedularMovement error: ' . $e->getMessage());
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -504,19 +747,21 @@ class TaxController extends Controller
 
     private function calcularImpuesto(
         float $ingresosTotales,
-        float $ingresosNoConstitutivos,   // seg. social (EPS + pensión)
-        float $deducVivienda,             // intereses crédito hipotecario / leasing
-        float $deducSaludPrep,            // medicina prepagada
+        float $ingresosNoConstitutivos,      // seg. social (EPS + pensión)
+        float $deducVivienda,                // intereses crédito hipotecario / leasing
+        float $deducSaludPrep,               // medicina prepagada
         int   $numeroDependientes,
         float $aportesVoluntarios,
-        float $costosGastos,              // costos y gastos actividad (independiente/comerciante)
+        float $costosGastos,                 // costos y gastos actividad (independiente/comerciante)
         bool  $aplicarRentaExenta25 = true,
         float $retenciones          = 0.0,
         float $patrimonio           = 0.0,
         float $segSocialParaDisplay = 0.0,
         // ── Beneficios EXTRA (fuera del tope 40%) ──────────────────────────
-        float $deduccion1pctFE      = 0.0,  // Art 258 E.T.: 1% compras con FE + digital
+        float $deduccion1pctFE      = 0.0,   // Art 258 E.T.: 1% compras con FE + digital
         float $uvt                  = 49799.0, // valor UVT del año (default: 2025)
+        // ── Cédulas: si se pasa >= 0, la renta exenta 25% se topa a este monto (laboral+honorarios) ──
+        float $ingresosSujetosRentaExenta = -1.0,
     ): array {
         // ── Constantes legales (en UVT) ───────────────────────────────────
         $LIMITE_VIVIENDA_ANUAL_UVT  = 1200;  // Art 119 E.T.
@@ -547,7 +792,11 @@ class TaxController extends Controller
         // ── D. Renta exenta 25% (Art 206-10) — sujeta al tope 40% ────────
         $rentaExenta25 = 0.0;
         if ($aplicarRentaExenta25) {
-            $basePara25    = $ingresosNetos - $subtotalDeducciones;
+            $basePara25 = $ingresosNetos - $subtotalDeducciones;
+            // Si se proporcionó desglose por cédulas, limitar la base al monto laboral+honorarios
+            if ($ingresosSujetosRentaExenta >= 0) {
+                $basePara25 = min($basePara25, $ingresosSujetosRentaExenta);
+            }
             $rentaExenta25 = $basePara25 > 0 ? $basePara25 * 0.25 : 0.0;
             $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
             if ($rentaExenta25 > $tope25Pesos) {

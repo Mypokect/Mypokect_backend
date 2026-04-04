@@ -71,11 +71,13 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::post('/savings/cancel-plan',  [SavingsController::class, 'cancelPlan']);
 
     // 6. IMPUESTOS (RADAR Y DECLARACIÓN)
-    Route::get('/taxes/data',          [TaxController::class, 'getData']);        // Datos pre-llenados + cálculo por defecto
-    Route::get('/taxes/alerts',        [TaxController::class, 'checkLimits']);    // Semáforo Fiscal (año ?year=)
-    Route::get('/taxes/profile',       [TaxController::class, 'getProfile']);     // Perfil fiscal del usuario
-    Route::post('/taxes/profile',      [TaxController::class, 'saveProfile']);    // Guardar / actualizar perfil
-    Route::post('/taxes/recalculate',  [TaxController::class, 'recalculate'])->middleware('throttle:10,1');    // Simulador interactivo (Flutter envía params, backend calcula)
+    Route::get('/taxes/data',               [TaxController::class, 'getData']);              // Datos pre-llenados + cálculo por defecto
+    Route::get('/taxes/alerts',             [TaxController::class, 'checkLimits']);         // Semáforo Fiscal (año ?year=)
+    Route::get('/taxes/profile',            [TaxController::class, 'getProfile']);          // Perfil fiscal del usuario
+    Route::post('/taxes/profile',           [TaxController::class, 'saveProfile']);         // Guardar / actualizar perfil
+    Route::post('/taxes/recalculate',       [TaxController::class, 'recalculate'])->middleware('throttle:10,1');  // Simulador interactivo
+    Route::get('/taxes/cedular-movements',  [TaxController::class, 'getCedularMovements']); // Movimientos agrupados por cédula
+    Route::post('/taxes/move-cedular',      [TaxController::class, 'moveCedularMovement'])->middleware('throttle:30,1'); // Reclasificar movimiento
 
     // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
     Route::get('/budgets', [BudgetController::class, 'getBudgets']);
