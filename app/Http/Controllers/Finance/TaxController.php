@@ -339,11 +339,16 @@ class TaxController extends Controller
                 'ingresos_honorarios'     => ['nullable', 'numeric', 'min:0'],
                 'ingresos_capital'        => ['nullable', 'numeric', 'min:0'],
                 'ingresos_comercial'      => ['nullable', 'numeric', 'min:0'],
-                // Auditoría: array de reclasificaciones [{'id': 123, 'nueva_bolsa': 'comercial'}, ...]
+                // Auditoría ingresos: reclasificaciones [{'id': 123, 'nueva_bolsa': 'comercial'}, ...]
                 'asignaciones_auditoria'              => ['nullable', 'array'],
                 'asignaciones_auditoria.*.id'         => ['required_with:asignaciones_auditoria', 'integer'],
                 'asignaciones_auditoria.*.nueva_bolsa'=> ['required_with:asignaciones_auditoria', 'string',
                                                           'in:laboral,honorarios,capital,comercial,otros'],
+                // Auditoría gastos: asignación de gastos a bolsas [{'gasto_id': 456, 'bolsa_destino': 'capital'}, ...]
+                'asignaciones_gastos'                        => ['nullable', 'array'],
+                'asignaciones_gastos.*.gasto_id'             => ['required_with:asignaciones_gastos', 'integer'],
+                'asignaciones_gastos.*.bolsa_destino'        => ['required_with:asignaciones_gastos', 'string',
+                                                                 'in:honorarios,capital,comercial'],
             ]);
 
             $year       = (int) ($data['year'] ?? Carbon::now()->year);
@@ -472,6 +477,37 @@ class TaxController extends Controller
             // Si el usuario envió desglose, la renta exenta 25% se limita a laboral+honorarios (Art 206-10)
             $ingresosSujetosRenta25 = $tieneBolsas ? ($ingresosLaboral + $ingresosHonorarios) : -1.0;
 
+            // ── Distribución de gastos por bolsa (asignaciones_gastos) ──────────────
+            // Si el usuario envió asignaciones de gastos, aplica cada gasto a su bolsa
+            // antes de llamar a calcularImpuesto (los ingresos de cada bolsa quedan netos).
+            $asignacionesGastos = $data['asignaciones_gastos'] ?? [];
+            $costosPorBolsaAplicados = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0];
+
+            if (! empty($asignacionesGastos) && $tieneBolsas && Schema::hasColumn('movements', 'is_business_expense')) {
+                $idMapGastos = collect($asignacionesGastos)->keyBy('gasto_id');
+                $gastosAsignados = Auth::user()->movements()
+                    ->where('type', 'expense')
+                    ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
+                    ->whereIn('id', $idMapGastos->keys()->map(fn ($k) => (int) $k)->all())
+                    ->whereBetween('created_at', [$start, $end])
+                    ->get(['id', 'amount']);
+
+                foreach ($gastosAsignados as $gm) {
+                    $bDest = $idMapGastos[(string) $gm->id]['bolsa_destino'] ?? 'comercial';
+                    if (array_key_exists($bDest, $costosPorBolsaAplicados)) {
+                        $costosPorBolsaAplicados[$bDest] += (float) $gm->amount;
+                    }
+                }
+
+                // Aplica costos por bolsa reduciendo los ingresos de cada bolsa
+                $ingresosHonorarios = max(0.0, $ingresosHonorarios - $costosPorBolsaAplicados['honorarios']);
+                $ingresosCapital    = max(0.0, $ingresosCapital    - $costosPorBolsaAplicados['capital']);
+                $ingresosComercial  = max(0.0, $ingresosComercial  - $costosPorBolsaAplicados['comercial']);
+                // Una vez aplicados por bolsa, no duplicar en calcularImpuesto
+                $costosGastos = 0.0;
+            }
+
             $resultado = $this->calcularImpuesto(
                 ingresosTotales:            $ingresos,
                 ingresosNoConstitutivos:    $segSocial,
@@ -498,6 +534,7 @@ class TaxController extends Controller
             $resultado['costos_gastos_actividad']     = $costosGastos;
             $resultado['costos_actividad']            = $costosMovimientosList;
             $resultado['costos_no_absorbidos']        = $tieneBolsas ? round($costosNoAbsorbidos) : 0;
+            $resultado['costos_por_bolsa_aplicados']  = $costosPorBolsaAplicados;
 
             // ── Explicación contextual por perfil ────────────────────────────────────
             $fmtPesos = fn($n) => '$' . number_format(round(abs($n) / 1_000_000, 1), 1, '.', '') . 'M';
@@ -681,9 +718,15 @@ class TaxController extends Controller
                 $grouped[$bolsa]['total']         += (float) $mov->amount;
             }
 
-            // ── Costos deducibles con factura (is_business_expense + has_invoice) ──
-            $costosActividad = [];
-            $costosTotal     = 0.0;
+            // ── Gastos de actividad agrupados por bolsa (is_business_expense + has_invoice) ──
+            $gastosPorBolsa = [
+                'laboral'    => ['movimientos' => [], 'total' => 0.0],
+                'honorarios' => ['movimientos' => [], 'total' => 0.0],
+                'capital'    => ['movimientos' => [], 'total' => 0.0],
+                'comercial'  => ['movimientos' => [], 'total' => 0.0],
+            ];
+            $costosTotal = 0.0;
+
             if (Schema::hasColumn('movements', 'is_business_expense')) {
                 $expenseMovements = $user->movements()
                     ->where('type', 'expense')
@@ -691,25 +734,35 @@ class TaxController extends Controller
                     ->where('has_invoice', true)
                     ->whereBetween('created_at', [$start, $end])
                     ->orderByDesc('created_at')
-                    ->get(['id', 'description', 'amount', 'created_at']);
+                    ->get();
 
                 foreach ($expenseMovements as $mov) {
-                    $costosActividad[] = [
-                        'id'          => $mov->id,
-                        'description' => $mov->description ?? '',
-                        'amount'      => (float) $mov->amount,
-                        'date'        => $mov->created_at->toDateString(),
+                    // rent_type doubles as expense bolsa for business expenses; default 'comercial'
+                    $bExp = ($hasRentType && ! empty($mov->rent_type)
+                             && array_key_exists($mov->rent_type, $gastosPorBolsa))
+                        ? $mov->rent_type
+                        : 'comercial';
+
+                    $entry = [
+                        'id'             => $mov->id,
+                        'description'    => $mov->description ?? '',
+                        'amount'         => (float) $mov->amount,
+                        'date'           => $mov->created_at->toDateString(),
+                        'bolsa_asignada' => $bExp,
                     ];
-                    $costosTotal += (float) $mov->amount;
+                    $gastosPorBolsa[$bExp]['movimientos'][] = $entry;
+                    $gastosPorBolsa[$bExp]['total']         += (float) $mov->amount;
+                    $costosTotal                            += (float) $mov->amount;
                 }
             }
 
-            $comercialTotal           = $grouped['comercial']['total'] ?? 0.0;
-            $costosNoAbsorbidosFront  = max(0.0, $costosTotal - $comercialTotal);
+            // Flat list kept for backward compat
+            $costosActividad = array_merge(...array_map(fn ($b) => $b['movimientos'], $gastosPorBolsa));
 
+            $grouped['gastos_por_bolsa']       = $gastosPorBolsa;
             $grouped['costos_actividad']       = $costosActividad;
             $grouped['costos_actividad_total'] = $costosTotal;
-            $grouped['costos_no_absorbidos']   = $costosNoAbsorbidosFront;
+            $grouped['costos_no_absorbidos']   = max(0.0, $costosTotal - ($grouped['comercial']['total'] ?? 0.0));
 
             return $this->successResponse($grouped);
 
@@ -761,6 +814,50 @@ class TaxController extends Controller
             return $this->errorResponse('Movimiento no encontrado o no pertenece a tu cuenta.', 404);
         } catch (\Throwable $e) {
             Log::error('Tax moveCedularMovement error: ' . $e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
+
+    /**
+     * POST /taxes/move-gasto-cedular
+     *
+     * Reclasifica un gasto de actividad a otra bolsa cedular.
+     * Usa el campo rent_type para persistir la asignación.
+     *
+     * Body: { "movement_id": 456, "new_category": "capital" }
+     */
+    public function moveCedularExpense(Request $request): JsonResponse
+    {
+        try {
+            $data = $request->validate([
+                'movement_id'  => ['required', 'integer'],
+                'new_category' => ['required', 'string', 'in:laboral,honorarios,capital,comercial'],
+            ]);
+
+            $user        = Auth::user();
+            $movementId  = (int) $data['movement_id'];
+            $newCategory = $data['new_category'];
+
+            $movement = Movement::where('id', $movementId)
+                ->where('user_id', $user->id)
+                ->where('type', 'expense')
+                ->firstOrFail();
+
+            if (Schema::hasColumn('movements', 'rent_type')) {
+                $movement->rent_type = $newCategory;
+                $movement->save();
+            }
+
+            return $this->successResponse([
+                'movement_id'  => $movementId,
+                'new_category' => $newCategory,
+                'updated'      => true,
+            ], 'Gasto reclasificado correctamente.');
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return $this->errorResponse('Gasto no encontrado o no pertenece a tu cuenta.', 404);
+        } catch (\Throwable $e) {
+            Log::error('Tax moveCedularExpense error: ' . $e->getMessage());
             return $this->errorResponse($this->safeMessage($e));
         }
     }

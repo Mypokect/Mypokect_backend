@@ -77,7 +77,8 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::post('/taxes/profile',           [TaxController::class, 'saveProfile']);         // Guardar / actualizar perfil
     Route::post('/taxes/recalculate',       [TaxController::class, 'recalculate'])->middleware('throttle:10,1');  // Simulador interactivo
     Route::get('/taxes/cedular-movements',  [TaxController::class, 'getCedularMovements']); // Movimientos agrupados por cédula
-    Route::post('/taxes/move-cedular',      [TaxController::class, 'moveCedularMovement'])->middleware('throttle:30,1'); // Reclasificar movimiento
+    Route::post('/taxes/move-cedular',       [TaxController::class, 'moveCedularMovement'])->middleware('throttle:30,1'); // Reclasificar ingreso
+    Route::post('/taxes/move-gasto-cedular', [TaxController::class, 'moveCedularExpense'])->middleware('throttle:30,1');  // Reclasificar gasto
 
     // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
     Route::get('/budgets', [BudgetController::class, 'getBudgets']);
