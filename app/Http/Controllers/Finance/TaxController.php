@@ -204,6 +204,7 @@ class TaxController extends Controller
                 $costosGastosActividad = (float) $user->movements()
                     ->where('type', 'expense')
                     ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
                     ->whereBetween('created_at', [$start, $end])
                     ->sum('amount');
             }
@@ -226,6 +227,13 @@ class TaxController extends Controller
             // antes de que el usuario personalice el simulador.
             $segSocialDefault = round($ingresosTotales * 0.08, 2); // 4% EPS + 4% pensión
 
+            // Seg. social para el cálculo por defecto: estimado solo sobre bolsa laboral
+            // para no inflar la deducción cuando hay ingresos comerciales/capital.
+            $laboralHonorariosDefault = $ingresosPorBolsa['laboral'] + $ingresosPorBolsa['honorarios'];
+            $segSocialDefault = $laboralHonorariosDefault > 0
+                ? round($laboralHonorariosDefault * 0.08, 2)
+                : round($ingresosTotales * 0.08, 2); // fallback si no hay clasificación
+
             $resultadoPorDefecto = $this->calcularImpuesto(
                 ingresosTotales:         $ingresosTotales,
                 ingresosNoConstitutivos: $segSocialDefault,
@@ -240,6 +248,12 @@ class TaxController extends Controller
                 segSocialParaDisplay:    $segSocialDefault,
                 deduccion1pctFE:         $deduccionComprasGenerales * 0.01,
                 uvt:                     $uvt,
+                // Pasar el desglose de bolsas para activar RAMA A (cedular):
+                // el 25% de renta exenta queda aislado a laboral+honorarios.
+                ingresosLaboral:         $ingresosPorBolsa['laboral'],
+                ingresosHonorarios:      $ingresosPorBolsa['honorarios'],
+                ingresosCapital:         $ingresosPorBolsa['capital'],
+                ingresosComercial:       $ingresosPorBolsa['comercial'],
             );
 
             return $this->successResponse([
@@ -371,12 +385,25 @@ class TaxController extends Controller
             $start        = Carbon::create($year)->startOfYear();
             $end          = Carbon::create($year)->endOfYear();
             $costosGastos = 0.0;
+            $costosMovimientosList = [];
             if (in_array($tipo, ['independiente', 'comerciante']) && Schema::hasColumn('movements', 'is_business_expense')) {
-                $costosGastos = (float) Auth::user()->movements()
+                $costosMovimientos = Auth::user()->movements()
                     ->where('type', 'expense')
                     ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
                     ->whereBetween('created_at', [$start, $end])
-                    ->sum('amount');
+                    ->orderByDesc('created_at')
+                    ->get(['id', 'description', 'amount', 'created_at']);
+
+                foreach ($costosMovimientos as $cm) {
+                    $costosGastos += (float) $cm->amount;
+                    $costosMovimientosList[] = [
+                        'id'          => $cm->id,
+                        'description' => $cm->description ?? '',
+                        'amount'      => (float) $cm->amount,
+                        'date'        => $cm->created_at->toDateString(),
+                    ];
+                }
             }
 
             // Deducción 1% compras con FE + digital (aplica a todos los tipos)
@@ -459,6 +486,8 @@ class TaxController extends Controller
             // Beneficios por compras — Flutter los muestra en la sección Ley 2277
             $resultado['deduccion_compras_generales'] = $deduccion1pctFE;
             $resultado['costos_gastos_actividad']     = $costosGastos;
+            $resultado['costos_actividad']            = $costosMovimientosList;
+            $resultado['costos_no_absorbidos']        = $tieneBolsas ? round($costosNoAbsorbidos) : 0;
 
             // Desglose de cédulas (para que Flutter muestre la nota de 25% solo en laboral)
             $resultado['ingresos_desglosados'] = $tieneBolsas ? [
@@ -621,6 +650,36 @@ class TaxController extends Controller
                 $grouped[$bolsa]['movimientos'][] = $entry;
                 $grouped[$bolsa]['total']         += (float) $mov->amount;
             }
+
+            // ── Costos deducibles con factura (is_business_expense + has_invoice) ──
+            $costosActividad = [];
+            $costosTotal     = 0.0;
+            if (Schema::hasColumn('movements', 'is_business_expense')) {
+                $expenseMovements = $user->movements()
+                    ->where('type', 'expense')
+                    ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->orderByDesc('created_at')
+                    ->get(['id', 'description', 'amount', 'created_at']);
+
+                foreach ($expenseMovements as $mov) {
+                    $costosActividad[] = [
+                        'id'          => $mov->id,
+                        'description' => $mov->description ?? '',
+                        'amount'      => (float) $mov->amount,
+                        'date'        => $mov->created_at->toDateString(),
+                    ];
+                    $costosTotal += (float) $mov->amount;
+                }
+            }
+
+            $comercialTotal           = $grouped['comercial']['total'] ?? 0.0;
+            $costosNoAbsorbidosFront  = max(0.0, $costosTotal - $comercialTotal);
+
+            $grouped['costos_actividad']       = $costosActividad;
+            $grouped['costos_actividad_total'] = $costosTotal;
+            $grouped['costos_no_absorbidos']   = $costosNoAbsorbidosFront;
 
             return $this->successResponse($grouped);
 
@@ -833,14 +892,15 @@ class TaxController extends Controller
             $rentaLiquidaLaboral = max(0.0, $subtotalLaboralPostSeg - $rentaExenta25);
 
             // A-2. BOLSA COMERCIAL (Art 107, 119 E.T.)
-            // Costos y gastos de la actividad se restan PRIMERO
+            // Costos con factura se restan PRIMERO de comercial; el exceso se traslada a capital
             $comercialPostCostos   = max(0.0, $ingresosComercial - $costosGastos);
+            $costosNoAbsorbidos    = max(0.0, $costosGastos - $ingresosComercial);
             // Intereses de vivienda/leasing: el usuario los asigna a esta bolsa
             $dVivienda             = min($deducVivienda, $LIMITE_VIVIENDA_ANUAL_UVT * $uvt);
             $rentaLiquidaComercial = max(0.0, $comercialPostCostos - $dVivienda);
 
-            // A-3. BOLSA CAPITAL — sin deducciones específicas
-            $rentaLiquidaCapital = max(0.0, $ingresosCapital);
+            // A-3. BOLSA CAPITAL — costos no absorbidos por comercial se deducen aquí (Art 107)
+            $rentaLiquidaCapital = max(0.0, $ingresosCapital - $costosNoAbsorbidos);
 
             // A-4. OTROS — ingresos sin bolsa asignada
             $ingresosOtros = max(0.0,
@@ -890,10 +950,15 @@ class TaxController extends Controller
             $rentaExenta25 = 0.0;
             if ($aplicarRentaExenta25) {
                 $basePara25 = $ingresosNetos - $subtotalDeducciones;
+                // Si se proporcionó explícitamente la suma laboral+honorarios, limitar la base.
+                // Bloqueo: comercial, capital y otros NUNCA forman parte de la base del 25%.
                 if ($ingresosSujetosRentaExenta >= 0) {
                     $basePara25 = min($basePara25, $ingresosSujetosRentaExenta);
                 }
-                $rentaExenta25 = $basePara25 > 0 ? $basePara25 * 0.25 : 0.0;
+                // Seguridad adicional: la base no puede superar los ingresos totales netos
+                // (cubre el caso donde ingresosSujetosRentaExenta no fue pasado explícitamente)
+                $basePara25    = max(0.0, $basePara25);
+                $rentaExenta25 = $basePara25 * 0.25;
                 $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
                 if ($rentaExenta25 > $tope25Pesos) { $rentaExenta25 = $tope25Pesos; }
             }
@@ -920,6 +985,7 @@ class TaxController extends Controller
             $comercialPostCostos    = 0.0;
             $rentaLiquidaComercial  = 0.0;
             $rentaLiquidaCapital    = 0.0;
+            $costosNoAbsorbidos     = 0.0;
             $ingresosOtros          = 0.0;
             $baseConsolidada        = 0.0;
         }
@@ -978,23 +1044,37 @@ class TaxController extends Controller
             $lineas[] = ['concepto' => 'Bolsa Laboral + Honorarios',                                   'monto' => round($subtotalLaboralBruto),     'tipo' => 'suma'];
             if ($segSocialLaboral > 0)
                 $lineas[] = ['concepto' => '(-) Seguridad Social — EPS + Pensión',                    'monto' => round($segSocialLaboral),         'tipo' => 'resta'];
-            if ($rentaExenta25 > 0)
-                $lineas[] = ['concepto' => '(-) Renta Exenta 25% Laboral (Art 206-10)',                'monto' => round($rentaExenta25),            'tipo' => 'resta'];
+            if ($rentaExenta25 > 0) {
+                $fmtLab = '$' . number_format(round($subtotalLaboralBruto / 1_000_000, 1), 1, '.', '') . 'M';
+                $lineas[] = [
+                    'concepto' => '(-) Beneficio legal 25% — aplicado únicamente sobre tus Rentas de Trabajo (' . $fmtLab . ') · Art 206-10',
+                    'monto'    => round($rentaExenta25),
+                    'tipo'     => 'resta',
+                ];
+            }
             $lineas[] = ['concepto' => '(=) Renta Laboral Neta',                                       'monto' => round($rentaLiquidaLaboral),      'tipo' => 'subtotal'];
 
             // ── Sección Comercial ─────────────────────────────────────────
             if ($ingresosComercial > 0 || $costosGastos > 0 || $dVivienda > 0) {
-                $lineas[] = ['concepto' => 'Bolsa Comercial',                                          'monto' => round($ingresosComercial),        'tipo' => 'suma'];
-                if ($costosGastos > 0)
-                    $lineas[] = ['concepto' => '(-) Costos y Gastos actividad (Art 107)',               'monto' => round($costosGastos),             'tipo' => 'resta'];
+                $costosEnComercial = min($costosGastos, $ingresosComercial);
+                $lineas[] = ['concepto' => 'Bolsa Comercial',                                                        'monto' => round($ingresosComercial),     'tipo' => 'suma'];
+                if ($costosEnComercial > 0)
+                    $lineas[] = ['concepto' => '(-) Costos con Factura — Utilidad en Ventas (Art 107)',               'monto' => round($costosEnComercial),     'tipo' => 'resta'];
                 if ($dVivienda > 0)
-                    $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)',          'monto' => round($dVivienda),                'tipo' => 'resta'];
-                $lineas[] = ['concepto' => '(=) Renta Comercial Neta',                                 'monto' => round($rentaLiquidaComercial),    'tipo' => 'subtotal'];
+                    $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)',                       'monto' => round($dVivienda),             'tipo' => 'resta'];
+                $lineas[] = ['concepto' => '(=) Utilidad en Ventas Neta',                                            'monto' => round($rentaLiquidaComercial), 'tipo' => 'subtotal'];
             }
 
             // ── Sección Capital ───────────────────────────────────────────
-            if ($rentaLiquidaCapital > 0)
-                $lineas[] = ['concepto' => 'Bolsa Capital (neta)',                                     'monto' => round($rentaLiquidaCapital),      'tipo' => 'suma'];
+            if ($ingresosCapital > 0 || $costosNoAbsorbidos > 0) {
+                if ($costosNoAbsorbidos > 0) {
+                    $lineas[] = ['concepto' => 'Bolsa Capital',                                                      'monto' => round($ingresosCapital),          'tipo' => 'suma'];
+                    $lineas[] = ['concepto' => '(-) Costos con Factura — Utilidad Real (Art 107)',                   'monto' => round($costosNoAbsorbidos),       'tipo' => 'resta'];
+                    $lineas[] = ['concepto' => '(=) Utilidad en Capital',                                            'monto' => round($rentaLiquidaCapital),      'tipo' => 'subtotal'];
+                } else {
+                    $lineas[] = ['concepto' => 'Bolsa Capital (neta)',                                               'monto' => round($rentaLiquidaCapital),      'tipo' => 'suma'];
+                }
+            }
 
             $lineas[] = ['concepto' => '(=) Base Consolidada (suma de bolsas)',                        'monto' => round($baseConsolidada),          'tipo' => 'subtotal'];
 
