@@ -250,7 +250,7 @@ class TaxController extends Controller
                 retenciones:             (float) ($profile?->retenciones    ?? 0),
                 patrimonio:              (float) ($profile?->patrimonio     ?? 0),
                 segSocialParaDisplay:    $segSocialDefault,
-                deduccion1pctFE:         $deduccionComprasGenerales * 0.01,
+                deduccion1pctFE:         $deduccionComprasGenerales,
                 uvt:                     $uvt,
                 // Pasar el desglose de bolsas para activar RAMA A (cedular):
                 // el 25% de renta exenta queda aislado a laboral+honorarios.
@@ -533,7 +533,7 @@ class TaxController extends Controller
             $resultado['deduccion_compras_generales'] = $deduccion1pctFE;
             $resultado['costos_gastos_actividad']     = $costosGastos;
             $resultado['costos_actividad']            = $costosMovimientosList;
-            $resultado['costos_no_absorbidos']        = $tieneBolsas ? round($costosNoAbsorbidos) : 0;
+            // costos_no_absorbidos ya viene calculado dentro de calcularImpuesto() — no redefinir
             $resultado['costos_por_bolsa_aplicados']  = $costosPorBolsaAplicados;
 
             // ── Explicación contextual por perfil ────────────────────────────────────
@@ -1280,6 +1280,13 @@ class TaxController extends Controller
             'mensajes_explicativos'        => $mensajes,
             'depuracion_paso_a_paso'       => $depuracion,
             'memoria_calculo'              => $memoriaCalculo,
+            // ── Utilidades por bolsa — para que Flutter muestre netos por cédula ──
+            'costos_no_absorbidos'         => $tieneBolsas ? round($costosNoAbsorbidos) : 0,
+            'renta_liquida_laboral'        => $tieneBolsas ? round($rentaLiquidaLaboral)    : 0,
+            'renta_liquida_honorarios'     => $tieneBolsas ? round($ingresosHonorarios)     : 0,
+            'renta_liquida_capital'        => $tieneBolsas ? round($rentaLiquidaCapital)    : 0,
+            'renta_liquida_comercial'      => $tieneBolsas ? round($rentaLiquidaComercial)  : 0,
+            'base_consolidada_cedular'     => $tieneBolsas ? round($baseConsolidada)        : 0,
         ];
     }
 
