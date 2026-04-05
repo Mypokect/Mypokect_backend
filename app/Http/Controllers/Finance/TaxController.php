@@ -436,20 +436,24 @@ class TaxController extends Controller
             $ingresosSujetosRenta25 = $tieneBolsas ? ($ingresosLaboral + $ingresosHonorarios) : -1.0;
 
             $resultado = $this->calcularImpuesto(
-                ingresosTotales:           $ingresos,
-                ingresosNoConstitutivos:   $segSocial,
-                deducVivienda:             $deducVivienda,
-                deducSaludPrep:            $deducSalud,
-                numeroDependientes:        $numDep,
-                aportesVoluntarios:        0.0,
-                costosGastos:              $costosGastos,
-                aplicarRentaExenta25:      $aplicarRenta25,
-                retenciones:               $retenciones,
-                patrimonio:                $patrimonio,
-                segSocialParaDisplay:      $segSocial,
-                deduccion1pctFE:           $deduccion1pctFE,
-                uvt:                       $uvt,
-                ingresosSujetosRentaExenta:$ingresosSujetosRenta25,
+                ingresosTotales:            $ingresos,
+                ingresosNoConstitutivos:    $segSocial,
+                deducVivienda:              $deducVivienda,
+                deducSaludPrep:             $deducSalud,
+                numeroDependientes:         $numDep,
+                aportesVoluntarios:         0.0,
+                costosGastos:               $costosGastos,
+                aplicarRentaExenta25:       $aplicarRenta25,
+                retenciones:                $retenciones,
+                patrimonio:                 $patrimonio,
+                segSocialParaDisplay:       $segSocial,
+                deduccion1pctFE:            $deduccion1pctFE,
+                uvt:                        $uvt,
+                ingresosSujetosRentaExenta: $ingresosSujetosRenta25,
+                ingresosLaboral:            $ingresosLaboral,
+                ingresosHonorarios:         $ingresosHonorarios,
+                ingresosCapital:            $ingresosCapital,
+                ingresosComercial:          $ingresosComercial,
             );
 
             // Beneficios por compras — Flutter los muestra en la sección Ley 2277
@@ -769,6 +773,9 @@ class TaxController extends Controller
 
     // ── Motor Fiscal (Art 241 + Art 336 E.T., Ley 2277 de 2022) ─────────────
     // Única fuente de verdad fiscal. Flutter solo mapea y pinta.
+    // Cuando se proporcionan ingresosLaboral/Honorarios/Capital/Comercial, activa
+    // el cálculo cedular: cada bolsa se depura con sus propias deducciones antes
+    // de consolidar la base gravable total.
 
     private function calcularImpuesto(
         float $ingresosTotales,
@@ -782,11 +789,14 @@ class TaxController extends Controller
         float $retenciones          = 0.0,
         float $patrimonio           = 0.0,
         float $segSocialParaDisplay = 0.0,
-        // ── Beneficios EXTRA (fuera del tope 40%) ──────────────────────────
         float $deduccion1pctFE      = 0.0,   // Art 258 E.T.: 1% compras con FE + digital
-        float $uvt                  = 49799.0, // valor UVT del año (default: 2025)
-        // ── Cédulas: si se pasa >= 0, la renta exenta 25% se topa a este monto (laboral+honorarios) ──
-        float $ingresosSujetosRentaExenta = -1.0,
+        float $uvt                  = 49799.0,
+        float $ingresosSujetosRentaExenta = -1.0, // backward-compat (flat path)
+        // ── Cédulas individuales — activan el cálculo segmentado ──────────
+        float $ingresosLaboral    = 0.0,
+        float $ingresosHonorarios = 0.0,
+        float $ingresosCapital    = 0.0,
+        float $ingresosComercial  = 0.0,
     ): array {
         // ── Constantes legales (en UVT) ───────────────────────────────────
         $LIMITE_VIVIENDA_ANUAL_UVT  = 1200;  // Art 119 E.T.
@@ -797,93 +807,148 @@ class TaxController extends Controller
         $TOPE_GLOBAL_ANUAL_UVT      = 1340;  // Art 336 E.T. párrafo 4
         $TOPE_OBLIGACION_UVT        = 1400;  // obligación de declarar renta
 
-        // ── A. Renta Líquida (Art 336) ────────────────────────────────────
-        // = Ingresos Brutos - Ingresos No Constitutivos (seg. social) - Costos y Gastos actividad
-        $ingresosNetos = max(0.0, $ingresosTotales - $ingresosNoConstitutivos - $costosGastos);
-
-        // ── B. Beneficios FUERA del tope 40% (se restan después del tope) ─
-        // B.1 Dependientes — Art 387 E.T.: 72 UVT × dep., máx 4
         $numDep                 = min($numeroDependientes, 4);
         $deducDependientesExtra = round($numDep * $DEDUC_DEPENDIENTE_UVT * $uvt);
-        // B.2 Deducción 1% FE — Art 258 E.T. (Ley 2277): ya viene como monto absoluto
         $deduc1pctFEAplicada    = max(0.0, $deduccion1pctFE);
 
-        // ── C. Deducciones SUJETAS al tope 40% (Art 336) ─────────────────
-        // Incluye: Intereses Vivienda + Prepagada + Renta Exenta 25%
-        $dVivienda           = min($deducVivienda,   $LIMITE_VIVIENDA_ANUAL_UVT  * $uvt);
-        $dSalud              = min($deducSaludPrep,  $LIMITE_PREPAGADA_ANUAL_UVT * $uvt);
-        $subtotalDeducciones = $dVivienda + $dSalud + $aportesVoluntarios;
+        $tieneBolsas = ($ingresosLaboral + $ingresosHonorarios + $ingresosCapital + $ingresosComercial) > 0;
 
-        // ── D. Renta exenta 25% (Art 206-10) — sujeta al tope 40% ────────
-        $rentaExenta25 = 0.0;
-        if ($aplicarRentaExenta25) {
-            $basePara25 = $ingresosNetos - $subtotalDeducciones;
-            // Si se proporcionó desglose por cédulas, limitar la base al monto laboral+honorarios
-            if ($ingresosSujetosRentaExenta >= 0) {
-                $basePara25 = min($basePara25, $ingresosSujetosRentaExenta);
+        // ══════════════════════════════════════════════════════════════════
+        // RAMA A — Cálculo CEDULAR (cuando hay desglose por bolsas)
+        // Cada bolsa se depura con sus propias deducciones antes de sumar.
+        // ══════════════════════════════════════════════════════════════════
+        if ($tieneBolsas) {
+
+            // A-1. BOLSA LABORAL + HONORARIOS (Art 103, 206, 336 E.T.)
+            $subtotalLaboralBruto   = $ingresosLaboral + $ingresosHonorarios;
+            // Seg. social se aplica SOLO sobre ingresos de trabajo; no puede superar el subtotal
+            $segSocialLaboral       = min($ingresosNoConstitutivos, $subtotalLaboralBruto);
+            $subtotalLaboralPostSeg = max(0.0, $subtotalLaboralBruto - $segSocialLaboral);
+            // Renta exenta 25% (Art 206-10) — ÚNICAMENTE sobre la bolsa laboral
+            $rentaExenta25 = 0.0;
+            if ($aplicarRentaExenta25 && $subtotalLaboralPostSeg > 0) {
+                $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
+                $rentaExenta25 = min($subtotalLaboralPostSeg * 0.25, $tope25Pesos);
             }
-            $rentaExenta25 = $basePara25 > 0 ? $basePara25 * 0.25 : 0.0;
-            $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
-            if ($rentaExenta25 > $tope25Pesos) {
-                $rentaExenta25 = $tope25Pesos;
+            $rentaLiquidaLaboral = max(0.0, $subtotalLaboralPostSeg - $rentaExenta25);
+
+            // A-2. BOLSA COMERCIAL (Art 107, 119 E.T.)
+            // Costos y gastos de la actividad se restan PRIMERO
+            $comercialPostCostos   = max(0.0, $ingresosComercial - $costosGastos);
+            // Intereses de vivienda/leasing: el usuario los asigna a esta bolsa
+            $dVivienda             = min($deducVivienda, $LIMITE_VIVIENDA_ANUAL_UVT * $uvt);
+            $rentaLiquidaComercial = max(0.0, $comercialPostCostos - $dVivienda);
+
+            // A-3. BOLSA CAPITAL — sin deducciones específicas
+            $rentaLiquidaCapital = max(0.0, $ingresosCapital);
+
+            // A-4. OTROS — ingresos sin bolsa asignada
+            $ingresosOtros = max(0.0,
+                $ingresosTotales - $subtotalLaboralBruto - $ingresosCapital - $ingresosComercial
+            );
+
+            // A-5. BASE CONSOLIDADA = suma de rentas líquidas por bolsa
+            $baseConsolidada = $rentaLiquidaLaboral + $rentaLiquidaComercial
+                             + $rentaLiquidaCapital + $ingresosOtros;
+            $ingresosNetos   = $baseConsolidada;
+
+            // A-6. Prepagada sobre la base consolidada (sujeta al tope 40%)
+            //      Vivienda ya fue aplicada en la bolsa comercial — no duplicar
+            $dSalud              = min($deducSaludPrep, $LIMITE_PREPAGADA_ANUAL_UVT * $uvt);
+            $subtotalDeducciones = $dSalud;
+            $beneficiosSujetosAlTope = $subtotalDeducciones;
+
+            // A-7. Tope global 40% Art 336 (sobre base consolidada)
+            $limiteGlobal40          = $baseConsolidada * $TOPE_GLOBAL_40_PCT;
+            $limiteGlobalUVT         = $TOPE_GLOBAL_ANUAL_UVT * $uvt;
+            $limiteFinalBeneficios   = min($limiteGlobal40, $limiteGlobalUVT);
+            $beneficiosAplicadosSujetos = min($beneficiosSujetosAlTope, $limiteFinalBeneficios);
+            $superoTope              = $beneficiosSujetosAlTope > $limiteFinalBeneficios;
+
+            // A-8. Base Gravable Final
+            $baseGravable = max(0.0,
+                $baseConsolidada
+                - $beneficiosAplicadosSujetos
+                - $deducDependientesExtra
+                - $deduc1pctFEAplicada
+            );
+
+            // Alias para compatibilidad con bloques compartidos inferiores
+            $ingresosNoConstitutivos = $segSocialLaboral;
+
+        // ══════════════════════════════════════════════════════════════════
+        // RAMA B — Cálculo PLANO (sin desglose — backward compat / getData)
+        // ══════════════════════════════════════════════════════════════════
+        } else {
+
+            $ingresosNetos       = max(0.0, $ingresosTotales - $ingresosNoConstitutivos - $costosGastos);
+
+            $dVivienda           = min($deducVivienda,  $LIMITE_VIVIENDA_ANUAL_UVT  * $uvt);
+            $dSalud              = min($deducSaludPrep, $LIMITE_PREPAGADA_ANUAL_UVT * $uvt);
+            $subtotalDeducciones = $dVivienda + $dSalud + $aportesVoluntarios;
+
+            $rentaExenta25 = 0.0;
+            if ($aplicarRentaExenta25) {
+                $basePara25 = $ingresosNetos - $subtotalDeducciones;
+                if ($ingresosSujetosRentaExenta >= 0) {
+                    $basePara25 = min($basePara25, $ingresosSujetosRentaExenta);
+                }
+                $rentaExenta25 = $basePara25 > 0 ? $basePara25 * 0.25 : 0.0;
+                $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
+                if ($rentaExenta25 > $tope25Pesos) { $rentaExenta25 = $tope25Pesos; }
             }
+
+            $beneficiosSujetosAlTope    = $subtotalDeducciones + $rentaExenta25;
+            $limiteGlobal40             = $ingresosNetos * $TOPE_GLOBAL_40_PCT;
+            $limiteGlobalUVT            = $TOPE_GLOBAL_ANUAL_UVT * $uvt;
+            $limiteFinalBeneficios      = min($limiteGlobal40, $limiteGlobalUVT);
+            $beneficiosAplicadosSujetos = min($beneficiosSujetosAlTope, $limiteFinalBeneficios);
+            $superoTope                 = $beneficiosSujetosAlTope > $limiteFinalBeneficios;
+
+            $baseGravable = max(0.0,
+                $ingresosNetos
+                - $beneficiosAplicadosSujetos
+                - $deducDependientesExtra
+                - $deduc1pctFEAplicada
+            );
+
+            // Inicializa vars cedurales para que el bloque de memoria no rompa
+            $subtotalLaboralBruto   = 0.0;
+            $segSocialLaboral       = 0.0;
+            $subtotalLaboralPostSeg = 0.0;
+            $rentaLiquidaLaboral    = 0.0;
+            $comercialPostCostos    = 0.0;
+            $rentaLiquidaComercial  = 0.0;
+            $rentaLiquidaCapital    = 0.0;
+            $ingresosOtros          = 0.0;
+            $baseConsolidada        = 0.0;
         }
 
-        // ── E. Tope global: 40% de Renta Líquida ó 1.340 UVT (el menor) — Art 336 ──
-        $beneficiosSujetosAlTope    = $subtotalDeducciones + $rentaExenta25;
-        $limiteGlobal40             = $ingresosNetos * $TOPE_GLOBAL_40_PCT;
-        $limiteGlobalUVT            = $TOPE_GLOBAL_ANUAL_UVT * $uvt;
-        $limiteFinalBeneficios      = min($limiteGlobal40, $limiteGlobalUVT);
-        $beneficiosAplicadosSujetos = min($beneficiosSujetosAlTope, $limiteFinalBeneficios);
-        $superoTope                 = $beneficiosSujetosAlTope > $limiteFinalBeneficios;
-
-        // ── F. Base Gravable Final ────────────────────────────────────────
-        // = Renta Líquida
-        //   - Beneficios del tope 40% (cap aplicado)        [sujetos al tope]
-        //   - Deducción dependientes (Art 387)               [fuera del tope]
-        //   - Deducción 1% FE compras digitales (Art 258)   [fuera del tope]
-        $baseGravable = max(0.0,
-            $ingresosNetos
-            - $beneficiosAplicadosSujetos
-            - $deducDependientesExtra
-            - $deduc1pctFEAplicada
-        );
-
-        // ── G. Impuesto — Tabla progresiva Art 241 E.T. (Ley 2277) ──────────
+        // ── Tabla progresiva Art 241 E.T. (Ley 2277) ─────────────────────
         $baseUVT       = $baseGravable / $uvt;
         $impuestoUVT   = $this->applyArt241($baseUVT);
         $impuestoBruto = round($impuestoUVT * $uvt);
 
-        // Obligación de declarar
         $topeDeclararPesos = $TOPE_OBLIGACION_UVT * $uvt;
-        $esObligado = $ingresosTotales > $topeDeclararPesos || $patrimonio > (4500 * $uvt);
+        $esObligado        = $ingresosTotales > $topeDeclararPesos || $patrimonio > (4500 * $uvt);
+        $impuestoAPagar    = max(0.0, $impuestoBruto - $retenciones);
 
-        // Impuesto neto a pagar (después de retenciones)
-        $impuestoAPagar = max(0.0, $impuestoBruto - $retenciones);
-
-        // Status para la UI
         $statusData = $this->buildStatusData($esObligado, $impuestoAPagar, $impuestoBruto, $retenciones);
+        $mensajes   = $this->buildMensajes($esObligado, $impuestoAPagar, $impuestoBruto, $retenciones,
+                          $superoTope, $baseUVT, $deducDependientesExtra);
 
-        // Mensajes explicativos (movidos desde Flutter)
-        $mensajes = $this->buildMensajes(
-            $esObligado, $impuestoAPagar, $impuestoBruto, $retenciones,
-            $superoTope, $baseUVT, $deducDependientesExtra
-        );
-
-        // ── Depuración paso a paso (para la "Escalera de Descuentos" en Flutter) ──
+        // ── Depuración paso a paso ────────────────────────────────────────
         $totalProtegido = $ingresosTotales - $baseGravable;
         $fmtM = fn ($n) => '$' . number_format(round(abs($n) / 1_000_000, 1), 1, '.', '') . 'M';
-
-        $textoResumen = 'Tu base gravable bajó de ' . $fmtM($ingresosTotales) . ' a ' . $fmtM($baseGravable)
+        $textoResumen   = 'Tu base gravable bajó de ' . $fmtM($ingresosTotales) . ' a ' . $fmtM($baseGravable)
             . ' gracias a ' . $fmtM($totalProtegido) . ' en beneficios legales'
             . ($impuestoBruto === 0.0 ? ', lo que reduce tu impuesto a $0.' : ', reduciendo tu impuesto a ' . $fmtM($impuestoBruto) . '.');
 
         $depuracion = [
             'ingreso_bruto'              => round($ingresosTotales),
             'menos_salud_pension'        => round($ingresosNoConstitutivos),
-            'menos_costos_gastos'        => round($costosGastos),
+            'menos_costos_gastos'        => $tieneBolsas ? 0 : round($costosGastos),
             'subtotal_ingresos_netos'    => round($ingresosNetos),
-            // ── Sujetos al tope 40% ──
             'menos_deduccion_vivienda'   => round($dVivienda),
             'menos_deduccion_salud_prep' => round($dSalud),
             'menos_aportes_voluntarios'  => round($aportesVoluntarios),
@@ -891,10 +956,8 @@ class TaxController extends Controller
             'aplico_tope_40'             => $superoTope,
             'ajuste_por_tope_40'         => $superoTope ? round($beneficiosSujetosAlTope - $beneficiosAplicadosSujetos) : 0,
             'beneficios_totales'         => round($beneficiosAplicadosSujetos),
-            // ── FUERA del tope 40% (Art 387 + Art 258) ──
             'menos_dependientes'         => round($deducDependientesExtra),
             'menos_deduccion_1pct_fe'    => round($deduc1pctFEAplicada),
-            // ── Resultado ──
             'base_gravable_final'        => round($baseGravable),
             'impuesto_resultante'        => $impuestoBruto,
             'total_protegido'            => round($totalProtegido),
@@ -902,43 +965,76 @@ class TaxController extends Controller
         ];
 
         // ── Memoria de Cálculo (Hoja de Trabajo DIAN) ─────────────────────
-        // Tarifa marginal aplicada según Art 241
-        $tarifaPct  = $this->getTarifaMarginal($baseUVT);
+        $tarifaPct   = $this->getTarifaMarginal($baseUVT);
         $tarifaTexto = $baseUVT <= 1090
             ? 'Base ≤ 1.090 UVT — tarifa 0% (exento)'
             : number_format($tarifaPct * 100, 0) . '% sobre el excedente de '
               . number_format($this->getLimiteInferiorUVT($baseUVT), 0) . ' UVT (Art 241)';
 
         $lineas = [];
-        $lineas[] = ['concepto' => 'Ingresos Brutos (suma de bolsas)',       'monto' => round($ingresosTotales),          'tipo' => 'suma'];
-        if ($ingresosNoConstitutivos > 0)
-            $lineas[] = ['concepto' => '(-) Seguridad Social — EPS + Pensión',   'monto' => round($ingresosNoConstitutivos),  'tipo' => 'resta'];
-        if ($costosGastos > 0)
-            $lineas[] = ['concepto' => '(-) Costos y Gastos de la actividad',    'monto' => round($costosGastos),             'tipo' => 'resta'];
-        $lineas[] = ['concepto' => '(=) Renta Líquida Inicial',                  'monto' => round($ingresosNetos),            'tipo' => 'subtotal'];
-        if ($dSalud > 0)
-            $lineas[] = ['concepto' => '(-) Medicina Prepagada (Art 387)',        'monto' => round($dSalud),                   'tipo' => 'resta'];
-        if ($dVivienda > 0)
-            $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)', 'monto' => round($dVivienda),          'tipo' => 'resta'];
-        if ($aportesVoluntarios > 0)
-            $lineas[] = ['concepto' => '(-) Aportes Voluntarios Pensión',         'monto' => round($aportesVoluntarios),       'tipo' => 'resta'];
-        if ($rentaExenta25 > 0)
-            $lineas[] = ['concepto' => '(-) Renta Exenta 25% Laboral (Art 206-10)', 'monto' => round($rentaExenta25),         'tipo' => 'resta'];
+
+        if ($tieneBolsas) {
+            // ── Sección Laboral + Honorarios ──────────────────────────────
+            $lineas[] = ['concepto' => 'Bolsa Laboral + Honorarios',                                   'monto' => round($subtotalLaboralBruto),     'tipo' => 'suma'];
+            if ($segSocialLaboral > 0)
+                $lineas[] = ['concepto' => '(-) Seguridad Social — EPS + Pensión',                    'monto' => round($segSocialLaboral),         'tipo' => 'resta'];
+            if ($rentaExenta25 > 0)
+                $lineas[] = ['concepto' => '(-) Renta Exenta 25% Laboral (Art 206-10)',                'monto' => round($rentaExenta25),            'tipo' => 'resta'];
+            $lineas[] = ['concepto' => '(=) Renta Laboral Neta',                                       'monto' => round($rentaLiquidaLaboral),      'tipo' => 'subtotal'];
+
+            // ── Sección Comercial ─────────────────────────────────────────
+            if ($ingresosComercial > 0 || $costosGastos > 0 || $dVivienda > 0) {
+                $lineas[] = ['concepto' => 'Bolsa Comercial',                                          'monto' => round($ingresosComercial),        'tipo' => 'suma'];
+                if ($costosGastos > 0)
+                    $lineas[] = ['concepto' => '(-) Costos y Gastos actividad (Art 107)',               'monto' => round($costosGastos),             'tipo' => 'resta'];
+                if ($dVivienda > 0)
+                    $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)',          'monto' => round($dVivienda),                'tipo' => 'resta'];
+                $lineas[] = ['concepto' => '(=) Renta Comercial Neta',                                 'monto' => round($rentaLiquidaComercial),    'tipo' => 'subtotal'];
+            }
+
+            // ── Sección Capital ───────────────────────────────────────────
+            if ($rentaLiquidaCapital > 0)
+                $lineas[] = ['concepto' => 'Bolsa Capital (neta)',                                     'monto' => round($rentaLiquidaCapital),      'tipo' => 'suma'];
+
+            $lineas[] = ['concepto' => '(=) Base Consolidada (suma de bolsas)',                        'monto' => round($baseConsolidada),          'tipo' => 'subtotal'];
+
+            // Prepagada sobre base consolidada
+            if ($dSalud > 0)
+                $lineas[] = ['concepto' => '(-) Medicina Prepagada (Art 387)',                         'monto' => round($dSalud),                   'tipo' => 'resta'];
+        } else {
+            // ── Cálculo plano (sin desglose) ──────────────────────────────
+            $lineas[] = ['concepto' => 'Ingresos Brutos (suma de bolsas)',                             'monto' => round($ingresosTotales),          'tipo' => 'suma'];
+            if ($ingresosNoConstitutivos > 0)
+                $lineas[] = ['concepto' => '(-) Seguridad Social — EPS + Pensión',                    'monto' => round($ingresosNoConstitutivos),  'tipo' => 'resta'];
+            if ($costosGastos > 0)
+                $lineas[] = ['concepto' => '(-) Costos y Gastos de la actividad',                     'monto' => round($costosGastos),             'tipo' => 'resta'];
+            $lineas[] = ['concepto' => '(=) Renta Líquida Inicial',                                   'monto' => round($ingresosNetos),            'tipo' => 'subtotal'];
+            if ($dSalud > 0)
+                $lineas[] = ['concepto' => '(-) Medicina Prepagada (Art 387)',                         'monto' => round($dSalud),                   'tipo' => 'resta'];
+            if ($dVivienda > 0)
+                $lineas[] = ['concepto' => '(-) Crédito Hipotecario / Vivienda (Art 119)',             'monto' => round($dVivienda),                'tipo' => 'resta'];
+            if ($aportesVoluntarios > 0)
+                $lineas[] = ['concepto' => '(-) Aportes Voluntarios Pensión',                         'monto' => round($aportesVoluntarios),       'tipo' => 'resta'];
+            if ($rentaExenta25 > 0)
+                $lineas[] = ['concepto' => '(-) Renta Exenta 25% Laboral (Art 206-10)',                'monto' => round($rentaExenta25),            'tipo' => 'resta'];
+        }
+
+        // ── Líneas comunes (fuera del tope 40%) ───────────────────────────
         if ($deducDependientesExtra > 0)
-            $lineas[] = ['concepto' => '(-) Dependientes a cargo (Art 387)',      'monto' => round($deducDependientesExtra),   'tipo' => 'resta_extra'];
+            $lineas[] = ['concepto' => '(-) Dependientes a cargo (Art 387)',                           'monto' => round($deducDependientesExtra),   'tipo' => 'resta_extra'];
         if ($deduc1pctFEAplicada > 0)
-            $lineas[] = ['concepto' => '(-) 1% Facturas Electrónicas (Art 258)',  'monto' => round($deduc1pctFEAplicada),      'tipo' => 'resta_extra'];
-        $lineas[] = ['concepto' => '(=) Base Gravable Final',                     'monto' => round($baseGravable),             'tipo' => 'subtotal_final'];
-        $lineas[] = ['concepto' => 'Impuesto — ' . $tarifaTexto,                  'monto' => $impuestoBruto,                   'tipo' => 'impuesto'];
+            $lineas[] = ['concepto' => '(-) 1% Facturas Electrónicas (Art 258)',                       'monto' => round($deduc1pctFEAplicada),      'tipo' => 'resta_extra'];
+        $lineas[] = ['concepto' => '(=) Base Gravable Final',                                          'monto' => round($baseGravable),             'tipo' => 'subtotal_final'];
+        $lineas[] = ['concepto' => 'Impuesto — ' . $tarifaTexto,                                       'monto' => $impuestoBruto,                   'tipo' => 'impuesto'];
         if ($retenciones > 0)
-            $lineas[] = ['concepto' => '(-) Retenciones en la Fuente',            'monto' => round($retenciones),              'tipo' => 'resta'];
-        $lineas[] = ['concepto' => '(=) TOTAL A PAGAR',                           'monto' => round($impuestoAPagar),           'tipo' => 'total'];
+            $lineas[] = ['concepto' => '(-) Retenciones en la Fuente',                                'monto' => round($retenciones),              'tipo' => 'resta'];
+        $lineas[] = ['concepto' => '(=) TOTAL A PAGAR',                                               'monto' => round($impuestoAPagar),           'tipo' => 'total'];
 
         $memoriaCalculo = [
-            'lineas'               => $lineas,
-            'tarifa_pct'           => $tarifaPct,
-            'tarifa_texto'         => $tarifaTexto,
-            'alerta_tope_40'       => $superoTope ? [
+            'lineas'         => $lineas,
+            'tarifa_pct'     => $tarifaPct,
+            'tarifa_texto'   => $tarifaTexto,
+            'alerta_tope_40' => $superoTope ? [
                 'monto_solicitado' => round($beneficiosSujetosAlTope),
                 'monto_aplicado'   => round($beneficiosAplicadosSujetos),
                 'recorte'          => round($beneficiosSujetosAlTope - $beneficiosAplicadosSujetos),
@@ -949,11 +1045,9 @@ class TaxController extends Controller
         ];
 
         return [
-            // Campos que los widgets de Flutter necesitan (en snake_case, Flutter mapea)
             'ingresos_brutos'              => round($ingresosTotales),
             'ingresos_netos'               => round($ingresosNetos),
             'seg_social_calculada'         => round($segSocialParaDisplay),
-            // ── Sujetos al tope 40% ──
             'deduc_vivienda_aplicada'      => round($dVivienda),
             'deduc_salud_aplicada'         => round($dSalud),
             'aportes_voluntarios'          => round($aportesVoluntarios),
@@ -962,10 +1056,8 @@ class TaxController extends Controller
             'beneficios_tope_40'           => round($beneficiosAplicadosSujetos),
             'supero_tope_40'               => $superoTope ? 1 : 0,
             'limite_final_beneficios'      => round($limiteFinalBeneficios),
-            // ── FUERA del tope 40% ──
             'deduccion_dependientes_extra' => round($deducDependientesExtra),
-            'deduccion_1pct_fe_aplicada'   => round($deduc1pctFEAplicada), // Art 258 E.T.
-            // ── Base y resultado ──
+            'deduccion_1pct_fe_aplicada'   => round($deduc1pctFEAplicada),
             'base_gravable'                => round($baseGravable),
             'base_gravable_uvt'            => round($baseUVT, 2),
             'impuesto_bruto'               => $impuestoBruto,
