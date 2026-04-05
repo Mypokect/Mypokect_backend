@@ -186,11 +186,15 @@ class TaxController extends Controller
             $tarjetasEstimadas  = round($ingresosTotales * 0.3, 2);
             $consumosEstimados  = round($ingresosTotales * 0.5, 2);
 
-            // ── Beneficio 1%: Deducción por compras con FE + pago digital (todos los usuarios) ──
+            // ── Beneficio 1%: Deducción por compras personales con FE (todos los usuarios) ──
+            // Solo compras personales (no is_business_expense) con factura y pago no-efectivo.
             $gastosDeduciblesGenerales = (float) $user->movements()
                 ->where('type', 'expense')
                 ->where('has_invoice', true)
-                ->where('payment_method', 'digital')
+                ->where('payment_method', '!=', 'cash')
+                ->where(function ($q) {
+                    $q->where('is_business_expense', false)->orWhereNull('is_business_expense');
+                })
                 ->whereBetween('created_at', [$start, $end])
                 ->sum('amount');
 
@@ -380,13 +384,15 @@ class TaxController extends Controller
 
             $aplicarRenta25 = in_array($tipo, ['empleado', 'independiente']);
 
-            // Costos y gastos reales de la actividad (solo independiente / comerciante)
-            // Para empleados: 0 — la ley prohíbe esta deducción (Art 107 E.T.)
+            // Costos y gastos reales de la actividad (no empleados — Art 107 E.T.)
+            // Aplica a independiente, comerciante y rentista de capital.
+            // Para empleados puros: 0 — la ley prohíbe esta deducción.
             $start        = Carbon::create($year)->startOfYear();
             $end          = Carbon::create($year)->endOfYear();
             $costosGastos = 0.0;
             $costosMovimientosList = [];
-            if (in_array($tipo, ['independiente', 'comerciante']) && Schema::hasColumn('movements', 'is_business_expense')) {
+            $tieneIngresosNoLaborales = ($honorarios + $capital + $comercial) > 0;
+            if ($tieneIngresosNoLaborales && Schema::hasColumn('movements', 'is_business_expense')) {
                 $costosMovimientos = Auth::user()->movements()
                     ->where('type', 'expense')
                     ->where('is_business_expense', true)
@@ -406,11 +412,15 @@ class TaxController extends Controller
                 }
             }
 
-            // Deducción 1% compras con FE + digital (aplica a todos los tipos)
+            // Deducción 1% compras personales con FE (todos los tipos — Art 258-1 E.T.)
+            // Excluye gastos de actividad (is_business_expense = true) para no duplicar.
             $gastosDeduciblesGenerales = (float) Auth::user()->movements()
                 ->where('type', 'expense')
                 ->where('has_invoice', true)
-                ->where('payment_method', 'digital')
+                ->where('payment_method', '!=', 'cash')
+                ->where(function ($q) {
+                    $q->where('is_business_expense', false)->orWhereNull('is_business_expense');
+                })
                 ->whereBetween('created_at', [$start, $end])
                 ->sum('amount');
 
@@ -488,6 +498,26 @@ class TaxController extends Controller
             $resultado['costos_gastos_actividad']     = $costosGastos;
             $resultado['costos_actividad']            = $costosMovimientosList;
             $resultado['costos_no_absorbidos']        = $tieneBolsas ? round($costosNoAbsorbidos) : 0;
+
+            // ── Explicación contextual por perfil ────────────────────────────────────
+            $fmtPesos = fn($n) => '$' . number_format(round(abs($n) / 1_000_000, 1), 1, '.', '') . 'M';
+            $perfilLabel = match($tipo) {
+                'empleado'      => 'Empleado',
+                'independiente' => 'Independiente',
+                'comerciante'   => 'Comerciante',
+                'rentista'      => 'Rentista de Capital',
+                default         => ucfirst($tipo),
+            };
+            $explCostos = $costosGastos > 0
+                ? 'descontaste ' . $fmtPesos($costosGastos) . ' en costos de actividad al 100% (Art 107 E.T.)'
+                : 'los costos de actividad no aplican para tu perfil (solo para independientes/comerciantes/rentistas)';
+            $expl1pct = $deduccion1pctFE > 0
+                ? 'más ' . $fmtPesos($deduccion1pctFE) . ' del beneficio 1% por compras personales con factura electrónica (Art 258-1 E.T.)'
+                : 'no se encontraron compras personales con factura electrónica para el beneficio 1% FE';
+            if (isset($resultado['depuracion_paso_a_paso']) && is_array($resultado['depuracion_paso_a_paso'])) {
+                $resultado['depuracion_paso_a_paso']['explicacion_deducciones'] =
+                    "Como {$perfilLabel}: {$explCostos}; {$expl1pct}.";
+            }
 
             // Desglose de cédulas (para que Flutter muestre la nota de 25% solo en laboral)
             $resultado['ingresos_desglosados'] = $tieneBolsas ? [
@@ -1103,7 +1133,11 @@ class TaxController extends Controller
         if ($deducDependientesExtra > 0)
             $lineas[] = ['concepto' => '(-) Dependientes a cargo (Art 387)',                           'monto' => round($deducDependientesExtra),   'tipo' => 'resta_extra'];
         if ($deduc1pctFEAplicada > 0)
-            $lineas[] = ['concepto' => '(-) 1% Facturas Electrónicas (Art 258)',                       'monto' => round($deduc1pctFEAplicada),      'tipo' => 'resta_extra'];
+            $lineas[] = [
+                'concepto' => '(-) 1% Compras personales con FE (Art 258-1) — aplica a todos los perfiles',
+                'monto'    => round($deduc1pctFEAplicada),
+                'tipo'     => 'resta_extra',
+            ];
         $lineas[] = ['concepto' => '(=) Base Gravable Final',                                          'monto' => round($baseGravable),             'tipo' => 'subtotal_final'];
         $lineas[] = ['concepto' => 'Impuesto — ' . $tarifaTexto,                                       'monto' => $impuestoBruto,                   'tipo' => 'impuesto'];
         if ($retenciones > 0)
