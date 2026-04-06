@@ -1010,12 +1010,15 @@ class TaxController extends Controller
             // Seg. social se aplica SOLO sobre ingresos de trabajo; no puede superar el subtotal
             $segSocialLaboral       = min($ingresosNoConstitutivos, $subtotalLaboralBruto);
             $subtotalLaboralPostSeg = max(0.0, $subtotalLaboralBruto - $segSocialLaboral);
-            // Renta exenta 25% (Art 206-10) — ÚNICAMENTE sobre la bolsa laboral
+            // Renta exenta 25% (Art 206-10) — ÚNICAMENTE sobre la sub-base laboral.
+            // En RAMA A esta variable está físicamente aislada: capital y comercial
+            // nunca entran aquí, por lo que el beneficio no puede "fugarse".
             $rentaExenta25 = 0.0;
-            if ($aplicarRentaExenta25 && $subtotalLaboralPostSeg > 0) {
+            if ($subtotalLaboralPostSeg > 0) {
                 $tope25Pesos   = $TOPE_25_LABORAL_UVT * $uvt;
                 $rentaExenta25 = min($subtotalLaboralPostSeg * 0.25, $tope25Pesos);
             }
+            // $baseFinalLaboral = (Laboral+Hon - SegSocial) × 0.75
             $rentaLiquidaLaboral = max(0.0, $subtotalLaboralPostSeg - $rentaExenta25);
 
             // A-2. BOLSA COMERCIAL (Art 107, 119 E.T.)
@@ -1137,6 +1140,11 @@ class TaxController extends Controller
             . ' gracias a ' . $fmtM($totalProtegido) . ' en beneficios legales'
             . ($impuestoBruto === 0.0 ? ', lo que reduce tu impuesto a $0.' : ', reduciendo tu impuesto a ' . $fmtM($impuestoBruto) . '.');
 
+        // Costos totales deducidos de la bolsa no-laboral (para la Hoja de Trabajo)
+        $cedularCostosNoLab = $tieneBolsas
+            ? round(min($costosGastos, $ingresosComercial) + $costosNoAbsorbidos + $dVivienda)
+            : 0;
+
         $depuracion = [
             'ingreso_bruto'              => round($ingresosTotales),
             'menos_salud_pension'        => round($ingresosNoConstitutivos),
@@ -1155,6 +1163,17 @@ class TaxController extends Controller
             'impuesto_resultante'        => $impuestoBruto,
             'total_protegido'            => round($totalProtegido),
             'texto_resumen'              => $textoResumen,
+            // ── Secciones cedulares (RAMA A) — Hoja de Trabajo dual ────────────
+            // Flutter usa estos campos para mostrar la separación legal de bolsas.
+            // Si cedular_activo = false, Flutter cae al modo plano (backward compat).
+            'cedular_activo'            => $tieneBolsas,
+            'cedular_laboral_bruto'     => $tieneBolsas ? round($subtotalLaboralBruto)      : 0,
+            'cedular_seg_social'        => $tieneBolsas ? round($segSocialLaboral)           : 0,
+            'cedular_renta25'           => $tieneBolsas ? round($rentaExenta25)              : 0,
+            'cedular_base_laboral'      => $tieneBolsas ? round($rentaLiquidaLaboral)        : 0,
+            'cedular_no_laboral_bruto'  => $tieneBolsas ? round($ingresosCapital + $ingresosComercial) : 0,
+            'cedular_costos_no_lab'     => $cedularCostosNoLab,
+            'cedular_base_no_laboral'   => $tieneBolsas ? round($rentaLiquidaComercial + $rentaLiquidaCapital + $ingresosOtros) : 0,
         ];
 
         // ── Memoria de Cálculo (Hoja de Trabajo DIAN) ─────────────────────
