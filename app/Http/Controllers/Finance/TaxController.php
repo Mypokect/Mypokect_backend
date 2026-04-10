@@ -213,6 +213,26 @@ class TaxController extends Controller
                     ->sum('amount');
             }
 
+            // ── Gastos de actividad por bolsa (Simetría de Gastos) ─────────────
+            // Totales por bolsa para que Flutter pinte [Ingreso] − [Gasto FE] = [Neto]
+            $gastosPorBolsaTotales = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0];
+            if (Schema::hasColumn('movements', 'is_business_expense')) {
+                $hasRentTypeCol = Schema::hasColumn('movements', 'rent_type');
+                $expGastos = $user->movements()
+                    ->where('type', 'expense')
+                    ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->get(['amount', 'rent_type']);
+                foreach ($expGastos as $eg) {
+                    $bDest = ($hasRentTypeCol && ! empty($eg->rent_type)
+                              && array_key_exists($eg->rent_type, $gastosPorBolsaTotales))
+                        ? $eg->rent_type
+                        : 'comercial';
+                    $gastosPorBolsaTotales[$bDest] += (float) $eg->amount;
+                }
+            }
+
             // Gastos NO deducibles: efectivo O sin factura (oportunidad perdida)
             $gastosNoDeducibles = (float) $user->movements()
                 ->where('type', 'expense')
@@ -283,6 +303,7 @@ class TaxController extends Controller
                 'has_profile'           => $profile !== null,
                 'resultado_por_defecto' => $resultadoPorDefecto,
                 'ingresos_por_bolsa'      => $ingresosPorBolsa,
+                'gastos_por_bolsa'        => $gastosPorBolsaTotales,
                 'ingresos_desglosados'    => $ingresosDesglosados,
                 'ingresos_para_auditoria' => $ingresosParaAuditoria,
                 'movimientos_ingreso'     => $ingresosParaAuditoria, // alias para el módulo de auditoría
