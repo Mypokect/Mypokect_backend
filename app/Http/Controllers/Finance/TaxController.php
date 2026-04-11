@@ -258,6 +258,12 @@ class TaxController extends Controller
                 ? round($laboralHonorariosDefault * 0.08, 2)
                 : round($ingresosTotales * 0.08, 2); // fallback si no hay clasificación
 
+            // ── Simetría de Costos: aplica gastos FE por bolsa antes del cálculo ────
+            // Capital y Comercial absorben sus propios costos de actividad (Art 107 E.T.)
+            // Laboral y Honorarios no tienen costos de actividad directos.
+            $ingresoCapitalNeto   = max(0.0, $ingresosPorBolsa['capital']   - ($gastosPorBolsaTotales['capital']    ?? 0.0));
+            $ingresoComercialNeto = max(0.0, $ingresosPorBolsa['comercial'] - ($gastosPorBolsaTotales['comercial']  ?? 0.0));
+
             $resultadoPorDefecto = $this->calcularImpuesto(
                 ingresosTotales:         $ingresosTotales,
                 ingresosNoConstitutivos: $segSocialDefault,
@@ -265,19 +271,17 @@ class TaxController extends Controller
                 deducSaludPrep:          (float) ($profile?->deduc_salud    ?? 0),
                 numeroDependientes:      (int)   ($profile?->dependientes   ?? 0),
                 aportesVoluntarios:      0.0,
-                costosGastos:            0.0,
+                costosGastos:            0.0,   // Absorbidos por bolsa arriba
                 aplicarRentaExenta25:    true,
                 retenciones:             (float) ($profile?->retenciones    ?? 0),
                 patrimonio:              (float) ($profile?->patrimonio     ?? 0),
                 segSocialParaDisplay:    $segSocialDefault,
                 deduccion1pctFE:         $deduccionComprasGenerales,
                 uvt:                     $uvt,
-                // Pasar el desglose de bolsas para activar RAMA A (cedular):
-                // el 25% de renta exenta queda aislado a laboral+honorarios.
                 ingresosLaboral:         $ingresosPorBolsa['laboral'],
                 ingresosHonorarios:      $ingresosPorBolsa['honorarios'],
-                ingresosCapital:         $ingresosPorBolsa['capital'],
-                ingresosComercial:       $ingresosPorBolsa['comercial'],
+                ingresosCapital:         $ingresoCapitalNeto,
+                ingresosComercial:       $ingresoComercialNeto,
             );
 
             return $this->successResponse([
@@ -306,6 +310,12 @@ class TaxController extends Controller
                 'gastos_por_bolsa'        => $gastosPorBolsaTotales,
                 'ingresos_desglosados'    => $ingresosDesglosados,
                 'ingresos_para_auditoria' => $ingresosParaAuditoria,
+                'utilidad_por_bolsa'      => [
+                    'laboral'    => $resultadoPorDefecto['renta_liquida_laboral']    ?? 0,
+                    'honorarios' => $resultadoPorDefecto['renta_liquida_honorarios'] ?? 0,
+                    'capital'    => $resultadoPorDefecto['renta_liquida_capital']    ?? 0,
+                    'comercial'  => $resultadoPorDefecto['renta_liquida_comercial']  ?? 0,
+                ],
                 'movimientos_ingreso'     => $ingresosParaAuditoria, // alias para el módulo de auditoría
                 'movimientos_auditados'   => array_map(fn($m) => array_merge($m, ['bolsa_actual' => $m['bolsa_asignada']]), $ingresosParaAuditoria),
                 // metadata: topes pre-formateados para que Flutter no necesite saber qué es una UVT
@@ -1321,9 +1331,11 @@ class TaxController extends Controller
             'depuracion_paso_a_paso'       => $depuracion,
             'memoria_calculo'              => $memoriaCalculo,
             // ── Utilidades por bolsa — para que Flutter muestre netos por cédula ──
+            // Laboral y Honorarios comparten la misma depuración (seg. social + renta exenta 25%).
+            // Se distribuye la renta líquida combinada proporcionalmente al ingreso bruto de cada bolsa.
             'costos_no_absorbidos'         => $tieneBolsas ? round($costosNoAbsorbidos) : 0,
-            'renta_liquida_laboral'        => $tieneBolsas ? round($rentaLiquidaLaboral)    : 0,
-            'renta_liquida_honorarios'     => $tieneBolsas ? round($ingresosHonorarios)     : 0,
+            'renta_liquida_laboral'        => $tieneBolsas ? round($rentaLiquidaLaboral * ($subtotalLaboralBruto > 0 ? $ingresosLaboral    / $subtotalLaboralBruto : 0.0)) : 0,
+            'renta_liquida_honorarios'     => $tieneBolsas ? round($rentaLiquidaLaboral * ($subtotalLaboralBruto > 0 ? $ingresosHonorarios / $subtotalLaboralBruto : 0.0)) : 0,
             'renta_liquida_capital'        => $tieneBolsas ? round($rentaLiquidaCapital)    : 0,
             'renta_liquida_comercial'      => $tieneBolsas ? round($rentaLiquidaComercial)  : 0,
             'base_consolidada_cedular'     => $tieneBolsas ? round($baseConsolidada)        : 0,
