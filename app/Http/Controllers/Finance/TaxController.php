@@ -76,69 +76,66 @@ class TaxController extends Controller
                 ->whereBetween('created_at', [$start, $end])
                 ->sum('amount');
 
-            // ── Desglose por bolsa de renta (rent_type) ───────────────────────
+            // ── Clasificación unificada: rent_type (BD) primero, heurística como fallback ──
+            $hasRentTypeCol  = Schema::hasColumn('movements', 'rent_type');
             $ingresosPorBolsa = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
-            if (Schema::hasColumn('movements', 'rent_type')) {
-                $bolsas = $user->movements()
-                    ->where('type', 'income')
-                    ->whereNotNull('rent_type')
-                    ->whereBetween('created_at', [$start, $end])
-                    ->selectRaw('rent_type, SUM(amount) as total')
-                    ->groupBy('rent_type')
-                    ->pluck('total', 'rent_type')
-                    ->toArray();
-                foreach ($bolsas as $bolsa => $total) {
-                    if (array_key_exists($bolsa, $ingresosPorBolsa)) {
-                        $ingresosPorBolsa[$bolsa] = (float) $total;
-                    }
-                }
-                // Ingresos sin clasificar van a 'otros' implícitamente en el total
-            }
+            $ingresosDesglosados = $ingresosPorBolsa; // alias mantenido por compatibilidad
 
-            // ── Desglose heurístico por nombre de Tag (sin tocar la tabla movements) ──
-            $ingresosDesglosados = ['laboral' => 0.0, 'honorarios' => 0.0, 'capital' => 0.0, 'comercial' => 0.0, 'otros' => 0.0];
             $keywordsMap = [
                 'laboral'    => ['sueldo', 'nómina', 'nomina', 'salario', 'quincena'],
                 'honorarios' => ['honorarios', 'servicios', 'freelance'],
                 'capital'    => ['arriendo', 'alquiler', 'intereses', 'dividendos'],
                 'comercial'  => ['venta', 'negocio', 'local', 'mercancía', 'mercancia'],
             ];
+
             $incomeMovements = $user->movements()
                 ->with('tag')
                 ->where('type', 'income')
                 ->whereBetween('created_at', [$start, $end])
+                ->orderByDesc('created_at')
                 ->get();
+
             $ingresosParaAuditoria = [];
             foreach ($incomeMovements as $mov) {
-                $tagName         = strtolower($mov->tag?->name ?? '');
-                $clasificado     = false;
-                $bolsaMovimiento = 'otros';
-                foreach ($keywordsMap as $bolsa => $keywords) {
-                    foreach ($keywords as $kw) {
-                        if (str_contains($tagName, $kw)) {
-                            $ingresosDesglosados[$bolsa] += (float) $mov->amount;
-                            $bolsaMovimiento = $bolsa;
-                            $clasificado     = true;
-                            break 2;
+                // 1. rent_type de BD (mayor prioridad — ya fue guardado por moveCedularMovement)
+                $bolsaMovimiento = null;
+                if ($hasRentTypeCol && ! empty($mov->rent_type)
+                        && array_key_exists($mov->rent_type, $ingresosPorBolsa)) {
+                    $bolsaMovimiento = $mov->rent_type;
+                }
+
+                // 2. Fallback heurístico por tag
+                if ($bolsaMovimiento === null) {
+                    $tagName = strtolower($mov->tag?->name ?? '');
+                    foreach ($keywordsMap as $bolsa => $keywords) {
+                        foreach ($keywords as $kw) {
+                            if (str_contains($tagName, $kw)) {
+                                $bolsaMovimiento = $bolsa;
+                                break 2;
+                            }
                         }
                     }
                 }
-                if (! $clasificado) {
-                    $ingresosDesglosados['otros'] += (float) $mov->amount;
-                }
+
+                $bolsaMovimiento ??= 'otros';
+                $ingresosPorBolsa[$bolsaMovimiento]    += (float) $mov->amount;
+                $ingresosDesglosados[$bolsaMovimiento] += (float) $mov->amount;
+
                 $ingresosParaAuditoria[] = [
-                    'id'             => $mov->id,
-                    'description'    => $mov->description ?? '',
-                    'amount'         => (float) $mov->amount,
-                    'date'           => $mov->created_at->toDateString(),
-                    'bolsa_asignada' => $bolsaMovimiento,
+                    'id'           => $mov->id,
+                    'description'  => $mov->description ?? '',
+                    'amount'       => (float) $mov->amount,
+                    'date'         => $mov->created_at->toDateString(),
+                    'bolsa_actual' => $bolsaMovimiento,
+                    'bolsa_asignada' => $bolsaMovimiento, // alias retrocompat
+                    'tipo'         => 'ingreso',
                 ];
             }
 
             $conteoPorBolsa = ['laboral' => 0, 'honorarios' => 0, 'capital' => 0, 'comercial' => 0, 'otros' => 0];
             foreach ($ingresosParaAuditoria as $auditItem) {
-                if (array_key_exists($auditItem['bolsa_asignada'], $conteoPorBolsa)) {
-                    $conteoPorBolsa[$auditItem['bolsa_asignada']]++;
+                if (array_key_exists($auditItem['bolsa_actual'], $conteoPorBolsa)) {
+                    $conteoPorBolsa[$auditItem['bolsa_actual']]++;
                 }
             }
 
@@ -233,6 +230,38 @@ class TaxController extends Controller
                 }
             }
 
+            // ── Gastos de actividad para auditoría (tipo: 'gasto') ───────────────
+            $gastosParaAuditoria = [];
+            if (Schema::hasColumn('movements', 'is_business_expense')) {
+                $expMovements = $user->movements()
+                    ->where('type', 'expense')
+                    ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->orderByDesc('created_at')
+                    ->get(['id', 'description', 'amount', 'created_at', 'rent_type']);
+
+                foreach ($expMovements as $mov) {
+                    $bDest = ($hasRentTypeCol && ! empty($mov->rent_type)
+                              && array_key_exists($mov->rent_type, $gastosPorBolsaTotales))
+                        ? $mov->rent_type
+                        : 'comercial';
+
+                    $gastosParaAuditoria[] = [
+                        'id'           => $mov->id,
+                        'description'  => $mov->description ?? '',
+                        'amount'       => (float) $mov->amount,
+                        'date'         => $mov->created_at->toDateString(),
+                        'bolsa_actual' => $bDest,
+                        'bolsa_asignada' => $bDest,
+                        'tipo'         => 'gasto',
+                    ];
+                }
+            }
+
+            // Lista completa para el módulo de auditoría (ingresos + gastos FE)
+            $movimientosAuditados = array_merge($ingresosParaAuditoria, $gastosParaAuditoria);
+
             // Gastos NO deducibles: efectivo O sin factura (oportunidad perdida)
             $gastosNoDeducibles = (float) $user->movements()
                 ->where('type', 'expense')
@@ -316,8 +345,8 @@ class TaxController extends Controller
                     'capital'    => $resultadoPorDefecto['renta_liquida_capital']    ?? 0,
                     'comercial'  => $resultadoPorDefecto['renta_liquida_comercial']  ?? 0,
                 ],
-                'movimientos_ingreso'     => $ingresosParaAuditoria, // alias para el módulo de auditoría
-                'movimientos_auditados'   => array_map(fn($m) => array_merge($m, ['bolsa_actual' => $m['bolsa_asignada']]), $ingresosParaAuditoria),
+                'movimientos_ingreso'     => $ingresosParaAuditoria, // alias retrocompat
+                'movimientos_auditados'   => $movimientosAuditados, // ingresos + gastos FE con tipo y bolsa_actual
                 // metadata: topes pre-formateados para que Flutter no necesite saber qué es una UVT
                 'metadata' => [
                     'topes' => [
@@ -463,10 +492,19 @@ class TaxController extends Controller
             $deduccion1pctFE = round($gastosDeduciblesGenerales * 0.01, 2);
 
             // ── Auditoría: reclasificaciones manuales de movimientos reales ────────
+            $hasRentTypeColR = Schema::hasColumn('movements', 'rent_type');
+            $keywordsMapR = [
+                'laboral'    => ['sueldo', 'nómina', 'nomina', 'salario', 'quincena'],
+                'honorarios' => ['honorarios', 'servicios', 'freelance'],
+                'capital'    => ['arriendo', 'alquiler', 'intereses', 'dividendos'],
+                'comercial'  => ['venta', 'negocio', 'local', 'mercancía', 'mercancia'],
+            ];
             $asignaciones = $data['asignaciones_auditoria'] ?? [];
             $conteoPorBolsaAuditoria = ['laboral' => 0, 'honorarios' => 0, 'capital' => 0, 'comercial' => 0, 'otros' => 0];
-            $movimientosAuditados = [];
+            $movimientosAuditadosIngresos = [];
+
             if (! empty($asignaciones)) {
+                // Reclasificaciones manuales enviadas por Flutter
                 $idMap = collect($asignaciones)->keyBy('id');
                 $movimientos = Auth::user()->movements()
                     ->where('type', 'income')
@@ -481,12 +519,13 @@ class TaxController extends Controller
                         $sumasPorBolsa[$nuevaBolsa] += (float) $mov->amount;
                         $conteoPorBolsaAuditoria[$nuevaBolsa]++;
                     }
-                    $movimientosAuditados[] = [
-                        'id'          => $mov->id,
-                        'description' => $mov->description ?? '',
-                        'amount'      => (float) $mov->amount,
-                        'date'        => $mov->created_at->toDateString(),
-                        'bolsa_actual'=> $nuevaBolsa,
+                    $movimientosAuditadosIngresos[] = [
+                        'id'           => $mov->id,
+                        'description'  => $mov->description ?? '',
+                        'amount'       => (float) $mov->amount,
+                        'date'         => $mov->created_at->toDateString(),
+                        'bolsa_actual' => $nuevaBolsa,
+                        'tipo'         => 'ingreso',
                     ];
                 }
 
@@ -497,7 +536,69 @@ class TaxController extends Controller
                 $data['ingresos_comercial']  = $sumasPorBolsa['comercial'];
                 // Recalcula total real desde los movimientos auditados
                 $ingresos = array_sum($sumasPorBolsa);
+            } else {
+                // Sin reclasificaciones: usa rent_type + heurística (igual que getData)
+                $incMovs = Auth::user()->movements()
+                    ->with('tag')
+                    ->where('type', 'income')
+                    ->whereBetween('created_at', [$start, $end])
+                    ->orderByDesc('created_at')
+                    ->get();
+
+                foreach ($incMovs as $mov) {
+                    $b = null;
+                    if ($hasRentTypeColR && ! empty($mov->rent_type)
+                            && array_key_exists($mov->rent_type, $conteoPorBolsaAuditoria)) {
+                        $b = $mov->rent_type;
+                    }
+                    if ($b === null) {
+                        $tagName = strtolower($mov->tag?->name ?? '');
+                        foreach ($keywordsMapR as $bk => $kws) {
+                            foreach ($kws as $kw) {
+                                if (str_contains($tagName, $kw)) { $b = $bk; break 2; }
+                            }
+                        }
+                    }
+                    $b ??= 'otros';
+                    $conteoPorBolsaAuditoria[$b]++;
+                    $movimientosAuditadosIngresos[] = [
+                        'id'           => $mov->id,
+                        'description'  => $mov->description ?? '',
+                        'amount'       => (float) $mov->amount,
+                        'date'         => $mov->created_at->toDateString(),
+                        'bolsa_actual' => $b,
+                        'tipo'         => 'ingreso',
+                    ];
+                }
             }
+
+            // Gastos FE para auditoría
+            $movimientosAuditadosGastos = [];
+            if (Schema::hasColumn('movements', 'is_business_expense')) {
+                $expMovsR = Auth::user()->movements()
+                    ->where('type', 'expense')
+                    ->where('is_business_expense', true)
+                    ->where('has_invoice', true)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->orderByDesc('created_at')
+                    ->get(['id', 'description', 'amount', 'created_at', 'rent_type']);
+
+                foreach ($expMovsR as $mov) {
+                    $bDest = ($hasRentTypeColR && ! empty($mov->rent_type)
+                              && in_array($mov->rent_type, ['laboral','honorarios','capital','comercial']))
+                        ? $mov->rent_type : 'comercial';
+                    $movimientosAuditadosGastos[] = [
+                        'id'           => $mov->id,
+                        'description'  => $mov->description ?? '',
+                        'amount'       => (float) $mov->amount,
+                        'date'         => $mov->created_at->toDateString(),
+                        'bolsa_actual' => $bDest,
+                        'tipo'         => 'gasto',
+                    ];
+                }
+            }
+
+            $movimientosAuditados = array_merge($movimientosAuditadosIngresos, $movimientosAuditadosGastos);
 
             // ── Desglose por cédula (opcional) ──────────────────────────────────────
             $ingresosLaboral    = (float) ($data['ingresos_laboral']    ?? 0);
