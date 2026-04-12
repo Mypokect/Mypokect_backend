@@ -206,16 +206,18 @@ class AuthController extends Controller
             ->sum('amount');
 
         $topTags = $user->movements()
-            ->whereBetween('created_at', [$start, $end])
-            ->whereNotNull('tag_id')
-            ->with('tag:id,name')
-            ->selectRaw('tag_id, SUM(amount) as total_amount')
-            ->groupBy('tag_id')
+            ->leftJoin('tags', 'movements.tag_id', '=', 'tags.id')
+            ->whereBetween('movements.created_at', [$start, $end])
+            ->whereNotNull('movements.tag_id')
+            ->whereNotNull('tags.name')
+            ->selectRaw('tags.name as tag_name, SUM(movements.amount) as total_amount')
+            ->groupBy('tags.id', 'tags.name')
             ->orderByDesc('total_amount')
             ->limit(5)
             ->get()
             ->mapWithKeys(function ($movement) {
-                return [$movement->tag->name => (float) $movement->total_amount];
+                $tagName = trim((string) ($movement->tag_name ?? ''));
+                return $tagName === '' ? [] : [$tagName => (float) $movement->total_amount];
             });
 
         return $this->successResponse([
