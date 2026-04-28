@@ -35,6 +35,15 @@ Route::post('/login', [AuthController::class, 'login'])
 Route::post('/register', [AuthController::class, 'register'])
     ->middleware('throttle:10,1');
 
+Route::post('/password-recovery/request-code', [AuthController::class, 'requestPasswordResetCode'])
+    ->middleware('throttle:6,1');
+
+Route::post('/password-recovery/verify-code', [AuthController::class, 'verifyPasswordResetCode'])
+    ->middleware('throttle:12,1');
+
+Route::post('/password-recovery/reset-password', [AuthController::class, 'resetPassword'])
+    ->middleware('throttle:6,1');
+
 // --- RUTAS PROTEGIDAS (Sanctum) ---
 Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
