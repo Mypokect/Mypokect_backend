@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Api\ReminderController;
 use App\Http\Controllers\Budget\BudgetController;
 use App\Http\Controllers\Finance\GoalContributionController;
 use App\Http\Controllers\Finance\MovementController;
@@ -68,6 +69,10 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // 4. CALENDARIO & PROGRAMADOS
     Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
     Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
+    Route::prefix('v1/calendar')->group(function () {
+        Route::apiResource('reminders', ReminderController::class);
+        Route::post('reminders/{reminder}/mark-paid', [ReminderController::class, 'markAsPaid']);
+    });
     // (Opcional si usas lógica de transacciones complejas)
     Route::post('/transactions/{transaction}/confirm', [TransactionController::class, 'confirmPayment']);
 
