@@ -8,6 +8,7 @@ use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
@@ -18,6 +19,9 @@ use Illuminate\Support\Str;
 class AuthController extends Controller
 {
     use ApiResponse;
+
+    private const PASSWORD_RESET_CODE_TTL_SECONDS = 30;
+    private const PASSWORD_RESET_TOKEN_TTL_MINUTES = 10;
 
     /**
      * Login.
@@ -89,6 +93,143 @@ class AuthController extends Controller
             Log::error('Register error: ' . $e->getMessage());
             return $this->errorResponse($this->safeMessage($e));
         }
+    }
+
+    /**
+     * Request a password recovery code by phone.
+     */
+    public function requestPasswordResetCode(Request $request): JsonResponse
+    {
+        $validated = Validator::make($request->all(), [
+            'phone' => 'required|string|max:20',
+        ]);
+
+        if ($validated->fails()) {
+            return $this->validationErrorResponse($validated->errors(), 'Datos inválidos para recuperar la contraseña');
+        }
+
+        $phone = trim((string) $request->input('phone'));
+        $user = User::where('phone', $phone)->first();
+
+        if (! $user) {
+            return $this->errorResponse('No existe una cuenta asociada a ese número de teléfono.', 404);
+        }
+
+        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+        Cache::put($this->passwordResetCodeCacheKey($phone), [
+            'user_id' => $user->id,
+            'code' => $code,
+            'expires_at' => now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS)->toIso8601String(),
+        ], now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS));
+
+        // TODO: Reemplazar este log por el envío real mediante un proveedor SMS.
+        Log::info('Password recovery code generated', [
+            'user_id' => $user->id,
+            'phone' => $phone,
+            'code' => $code,
+            'expires_in' => self::PASSWORD_RESET_CODE_TTL_SECONDS,
+        ]);
+
+        $data = [
+            'phone' => $phone,
+            'expires_in' => self::PASSWORD_RESET_CODE_TTL_SECONDS,
+        ];
+
+        if (! app()->isProduction()) {
+            $data['debug_code'] = $code;
+        }
+
+        return $this->successResponse($data, 'Código enviado correctamente.');
+    }
+
+    /**
+     * Verify recovery SMS code.
+     */
+    public function verifyPasswordResetCode(Request $request): JsonResponse
+    {
+        $validated = Validator::make($request->all(), [
+            'phone' => 'required|string|max:20',
+            'code' => 'required|digits:6',
+        ]);
+
+        if ($validated->fails()) {
+            return $this->validationErrorResponse($validated->errors(), 'Datos inválidos para verificar el código');
+        }
+
+        $phone = trim((string) $request->input('phone'));
+        $payload = Cache::get($this->passwordResetCodeCacheKey($phone));
+
+        if (! is_array($payload) || ! isset($payload['code'], $payload['user_id'])) {
+            return $this->errorResponse('El código expiró. Solicita uno nuevo.', 422);
+        }
+
+        if ((string) $payload['code'] !== (string) $request->input('code')) {
+            return $this->errorResponse('El código ingresado no es válido.', 422);
+        }
+
+        $resetToken = (string) Str::uuid();
+        Cache::put($this->passwordResetTokenCacheKey($phone, $resetToken), [
+            'user_id' => $payload['user_id'],
+        ], now()->addMinutes(self::PASSWORD_RESET_TOKEN_TTL_MINUTES));
+
+        Cache::forget($this->passwordResetCodeCacheKey($phone));
+
+        return $this->successResponse([
+            'phone' => $phone,
+            'reset_token' => $resetToken,
+            'reset_token_expires_in' => self::PASSWORD_RESET_TOKEN_TTL_MINUTES * 60,
+        ], 'Código verificado correctamente.');
+    }
+
+    /**
+     * Reset password using a verified recovery token.
+     */
+    public function resetPassword(Request $request): JsonResponse
+    {
+        $validated = Validator::make($request->all(), [
+            'phone' => 'required|string|max:20',
+            'reset_token' => 'required|string',
+            'password' => 'required|digits:4|confirmed',
+        ]);
+
+        if ($validated->fails()) {
+            return $this->validationErrorResponse($validated->errors(), 'Datos inválidos para actualizar la contraseña');
+        }
+
+        $phone = trim((string) $request->input('phone'));
+        $resetToken = (string) $request->input('reset_token');
+        $tokenPayload = Cache::get($this->passwordResetTokenCacheKey($phone, $resetToken));
+
+        if (! is_array($tokenPayload) || ! isset($tokenPayload['user_id'])) {
+            return $this->errorResponse('La validación expiró. Solicita un nuevo código.', 422);
+        }
+
+        $user = User::where('id', $tokenPayload['user_id'])
+            ->where('phone', $phone)
+            ->first();
+
+        if (! $user) {
+            return $this->errorResponse('No existe una cuenta asociada a ese número de teléfono.', 404);
+        }
+
+        $user->password = Hash::make((string) $request->input('password'));
+        $user->save();
+
+        Cache::forget($this->passwordResetTokenCacheKey($phone, $resetToken));
+        Cache::forget($this->passwordResetCodeCacheKey($phone));
+
+        return $this->successResponse(null, 'Contraseña actualizada correctamente.');
+    }
+
+    private function passwordResetCodeCacheKey(string $phone): string
+    {
+        return 'password_reset_code:' . Str::lower($phone);
+    }
+
+    private function passwordResetTokenCacheKey(string $phone, string $token): string
+    {
+        return 'password_reset_token:' . Str::lower($phone) . ':' . $token;
     }
 
     /**
