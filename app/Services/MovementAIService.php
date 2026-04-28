@@ -335,8 +335,10 @@ suggested_tag:
 
 has_invoice: true only if invoice words appear (factura, rut, electrónica, invoice). Otherwise false.
 
+rent_type: Only for income. Classify into exactly one of: "laboral" (salaries, commissions, bonuses), "honorarios" (freelance, professional services, consulting), "capital" (rent income, interest, dividends, investments), "comercial" (sales, business revenue, products sold), "otros" (any other income). If type is "expense", set to null.
+
 OUTPUT:
-{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false}
+{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false, "rent_type": null}
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -502,13 +504,20 @@ PROMPT;
             Log::debug('JSON decoded successfully', ['keys' => array_keys($data)]);
 
             // Normalize fields with defaults
+            $type = in_array($data['type'] ?? '', ['income', 'expense']) ? $data['type'] : 'expense';
+            $validRentTypes = ['laboral', 'honorarios', 'capital', 'comercial', 'otros'];
+            $rentType = ($type === 'income' && in_array($data['rent_type'] ?? '', $validRentTypes))
+                ? $data['rent_type']
+                : null;
+
             $result = [
                 'description' => $data['description'] ?? 'Movimiento',
                 'amount' => (float) ($data['amount'] ?? 0),
                 'suggested_tag' => $this->normalizeTag($data),
-                'type' => in_array($data['type'] ?? '', ['income', 'expense']) ? $data['type'] : 'expense',
+                'type' => $type,
                 'payment_method' => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
                 'has_invoice' => (bool) ($data['has_invoice'] ?? false),
+                'rent_type' => $rentType,
             ];
 
             Log::debug('Normalization completed', [
