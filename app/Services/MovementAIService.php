@@ -56,11 +56,12 @@ class MovementAIService
             $response = $this->callGroqAPI($prompt, 0.1);
 
             if (! $response) {
-                Log::error('Empty response from Groq API');
-                throw new \Exception('AI services unavailable');
+                Log::error('Empty response from Groq API — all models failed');
+                Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => null, 'outcome' => 'all_models_failed']);
+                return $this->insufficientDataResponse();
             }
 
-            Log::debug('Raw response received', ['response' => substr($response, 0, 150).'...']);
+            Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => substr($response, 0, 500)]);
 
             // Normalize response
             Log::debug('Normalizing movement suggestion');
@@ -77,12 +78,12 @@ class MovementAIService
             return $result;
 
         } catch (\Exception $e) {
-            Log::error('ERROR in suggestFromVoice', [
+            Log::error('ERROR in suggestFromVoice — returning insufficient_data', [
                 'error' => $e->getMessage(),
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
             ]);
-            throw $e;
+            return $this->insufficientDataResponse();
         }
     }
 
@@ -297,14 +298,31 @@ class MovementAIService
         ]);
 
         $prompt = <<<PROMPT
-ROLE: You are a financial transaction extractor. You convert voice transcriptions into structured JSON data.
+ROLE: You are a financial transaction extractor for a Colombian personal finance app. Convert voice/text input into structured JSON.
 
-TASK: Extract exactly one transaction from the transcription below.
+TASK: Extract exactly one transaction from the input below.
 
-RULES:
-- Return JSON only. No explanations, no extra text.
-- Detect the language from the transcription. ALL output text must match that language.
-- Do NOT invent data. Use defaults when information is missing.
+CRITICAL RULES:
+- Return JSON ONLY. No explanations, no markdown, no extra text.
+- NEVER return null. If you cannot confidently extract amount or action, return the template with empty/zero fields and set error_type to "insufficient_data".
+- Detect the language. ALL text fields (description, suggested_tag) must match that language.
+
+COLOMBIAN SLANG DICTIONARY (apply before parsing):
+- "luca" / "lucas" = 1,000 pesos (e.g., "50 lucas" = 50000)
+- "palo" / "palos" = 1,000,000 pesos (e.g., "2 palos" = 2000000)
+- "me cayó" / "me entró" / "me llegó" / "me pagaron" / "me depositaron" = received money → type: income
+- "gasté" / "pagué" / "compré" / "me cobró" / "me salió" = spent money → type: expense
+- "guardé" / "aparté" / "ahorré" / "le metí a" = saving → check goals
+- "plin" / "nequi" / "daviplata" / "transfiya" = digital payment_method
+- "en efectivo" / "en billete" / "en plata física" / "en cash" = payment_method: cash
+- "factura" / "rut" / "factura electrónica" / "fe" = has_invoice: true
+
+RENT_TYPE CLASSIFICATION (income movements only — apply in this priority order):
+1. laboral  → "sueldo" | "salario" | "nómina" | "nomina" | "pago de nómina" | "quincena" | "quincena de" | "me pagaron el sueldo" | "pago laboral" | "contrato"
+2. honorarios → "honorarios" | "consultoría" | "consultoria" | "freelance" | "servicios profesionales" | "factura de servicios" | "pago de servicios"
+3. capital   → "arriendo" | "arrendamiento" | "alquiler" | "intereses" | "rendimientos" | "dividendos" | "rentó" | "renta pasiva"
+4. comercial → "venta" | "vendí" | "negocio" | "mercancía" | "mercancia" | "local" | "facturé" | "factura de venta" | "caja" | "caja del día"
+5. otros     → any income not matching the above
 
 INPUT:
 Transcription: "$transcription"
@@ -312,33 +330,22 @@ User tags: [$tagsList]
 User goals: [$goalsList]
 
 DECISION LOGIC:
-- Money spent or paid → type: "expense"
-- Money received or earned → type: "income"
-- Goals are ONLY relevant when ALL of these are true: (1) money is NOT spent, (2) explicit saving verbs are present (ahorrar, guardar, apartar, saving), (3) a matching user goal exists. Otherwise IGNORE goals completely.
+- Money spent/paid/bought → type: "expense"
+- Money received/earned/salary → type: "income"
+- Goals: ONLY set suggested_tag to "Meta: <name>" when ALL 3 are true: (1) not an expense, (2) explicit saving verb present, (3) a matching goal exists in the list above.
 
 FIELD RULES:
+amount: numeric only. Apply slang dictionary above. "k"=1000, "mil"=1000, "millón"=1000000. Default: 0.
+description: 2–4 word summary. No numbers. Same language as input.
+type: "expense" | "income".
+payment_method: "cash" only for explicit cash words. Otherwise "digital".
+suggested_tag: Classify by SERVICE or ACTIVITY (not object names). Use existing tag if 90%+ match. Otherwise one generic category word.
+has_invoice: true only if invoice words present. Otherwise false.
+rent_type: Income only → "laboral" | "honorarios" | "capital" | "comercial" | "otros". Null for expenses.
+error_type: null if extraction succeeded. "insufficient_data" if amount is 0 AND description is empty (could not understand the command).
 
-amount: numeric only. Convert "k"=1000, "mil"=1000, "millón"=1000000. Default: 0.
-
-description: 2-4 word summary of the action. No numbers. Same language as transcription.
-
-type: "expense" or "income".
-
-payment_method: "cash" only if explicit cash words (efectivo, billetes, cash). Otherwise "digital".
-
-suggested_tag:
-- Classify by SERVICE or ACTIVITY type (not by object name).
-- If an existing user tag matches 90%+ semantically → use it exactly.
-- Otherwise return ONE generic category word in the user's language.
-- NEVER use object names (celular, laptop, carro, hotel names).
-- GOAL EXCEPTION: Only if all 3 goal conditions above are met → return "Meta: <nombre>" (ES) or "Goal: <name>" (EN).
-
-has_invoice: true only if invoice words appear (factura, rut, electrónica, invoice). Otherwise false.
-
-rent_type: Only for income. Classify into exactly one of: "laboral" (salaries, commissions, bonuses), "honorarios" (freelance, professional services, consulting), "capital" (rent income, interest, dividends, investments), "comercial" (sales, business revenue, products sold), "otros" (any other income). If type is "expense", set to null.
-
-OUTPUT:
-{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false, "rent_type": null}
+OUTPUT (return this exact structure, fill the fields):
+{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false, "rent_type": null, "error_type": null}
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -411,7 +418,7 @@ PROMPT;
                 ];
 
                 // Add response format for JSON requests (voice suggestions)
-                if (str_contains($prompt, 'JSON only')) {
+                if (str_contains(strtolower($prompt), 'json only')) {
                     $payload['response_format'] = ['type' => 'json_object'];
                     Log::debug('JSON response format enabled');
                 }
@@ -497,8 +504,8 @@ PROMPT;
             }
 
             if (! $data || ! is_array($data)) {
-                Log::error('Invalid AI JSON response after all attempts');
-                throw new \Exception('Invalid AI JSON response');
+                Log::error('Invalid AI JSON response after all attempts — returning insufficient_data');
+                return $this->insufficientDataResponse();
             }
 
             Log::debug('JSON decoded successfully', ['keys' => array_keys($data)]);
@@ -510,14 +517,31 @@ PROMPT;
                 ? $data['rent_type']
                 : null;
 
+            // If AI explicitly flagged insufficient data, return the error struct
+            if (isset($data['error_type']) && $data['error_type'] === 'insufficient_data') {
+                Log::warning('AI returned error_type=insufficient_data', ['raw' => substr($rawResponse, 0, 200)]);
+                return $this->insufficientDataResponse();
+            }
+
+            // Also treat zero-amount + empty description as insufficient
+            $parsedAmount = (float) ($data['amount'] ?? 0);
+            $parsedDescription = trim($data['description'] ?? '');
+            if ($parsedAmount === 0.0 && $parsedDescription === '') {
+                Log::warning('AI returned zero amount and empty description — insufficient_data');
+                return $this->insufficientDataResponse();
+            }
+
+            $suggestedTag = $this->normalizeTag($data);
             $result = [
-                'description' => $data['description'] ?? 'Movimiento',
-                'amount' => (float) ($data['amount'] ?? 0),
-                'suggested_tag' => $this->normalizeTag($data),
-                'type' => $type,
+                'description'    => $parsedDescription ?: 'Movimiento',
+                'amount'         => $parsedAmount,
+                'suggested_tag'  => $suggestedTag,
+                'type'           => $type,
                 'payment_method' => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
-                'has_invoice' => (bool) ($data['has_invoice'] ?? false),
-                'rent_type' => $rentType,
+                'has_invoice'    => (bool) ($data['has_invoice'] ?? false),
+                'rent_type'      => $rentType,
+                'is_goal'        => str_starts_with($suggestedTag, 'Meta:'),
+                'error_type'     => null,
             ];
 
             Log::debug('Normalization completed', [
@@ -534,13 +558,32 @@ PROMPT;
             return $result;
 
         } catch (\Exception $e) {
-            Log::error('ERROR in normalizeMovementSuggestion', [
+            Log::error('ERROR in normalizeMovementSuggestion — returning insufficient_data', [
                 'error' => $e->getMessage(),
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
             ]);
-            throw $e;
+            return $this->insufficientDataResponse();
         }
+    }
+
+    /**
+     * Returns the canonical "insufficient data" response struct.
+     * Used whenever AI output cannot be parsed or understood.
+     */
+    private function insufficientDataResponse(): array
+    {
+        return [
+            'description'    => '',
+            'amount'         => 0,
+            'suggested_tag'  => '',
+            'type'           => 'expense',
+            'payment_method' => 'digital',
+            'has_invoice'    => false,
+            'rent_type'      => null,
+            'is_goal'        => false,
+            'error_type'     => 'insufficient_data',
+        ];
     }
 
     /**

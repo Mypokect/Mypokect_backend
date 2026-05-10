@@ -77,9 +77,11 @@ class GoalContributionController extends Controller
 
             // Validate request
             $validator = Validator::make($request->all(), [
-                'goal_id' => 'required|exists:saving_goals,id|numeric',
-                'amount' => 'required|numeric|min:0.01',
-                'description' => 'nullable|string|max:255',
+                'goal_id'       => 'required|exists:saving_goals,id|numeric',
+                'amount'        => 'required|numeric|min:0.01',
+                'description'   => 'nullable|string|max:255',
+                'is_digital'    => 'nullable|boolean',
+                'location_name' => 'nullable|string|max:100',
             ]);
 
             if ($validator->fails()) {
@@ -103,10 +105,12 @@ class GoalContributionController extends Controller
             DB::beginTransaction();
 
             $contribution = GoalContribution::create([
-                'user_id' => $user->id,
-                'goal_id' => $goal->id,
-                'amount' => $request->amount,
-                'description' => $request->description ?? 'Abono a meta',
+                'user_id'       => $user->id,
+                'goal_id'       => $goal->id,
+                'amount'        => $request->amount,
+                'description'   => $request->description ?? 'Abono a meta',
+                'is_digital'    => $request->input('is_digital', false),
+                'location_name' => $request->input('location_name'),
             ]);
 
             DB::commit();
@@ -233,14 +237,16 @@ class GoalContributionController extends Controller
     private function transformToContribution(GoalContribution $contribution, SavingGoal $goal): array
     {
         return [
-            'id' => $contribution->id,
-            'goal_id' => $goal->id,
-            'goal_name' => $goal->name,
-            'amount' => (float) $contribution->amount,
-            'description' => $contribution->description,
-            'date' => $contribution->created_at->toIso8601String(),
-            'created_at' => $contribution->created_at->toIso8601String(),
-            'updated_at' => $contribution->updated_at->toIso8601String(),
+            'id'            => $contribution->id,
+            'goal_id'       => $goal->id,
+            'goal_name'     => $goal->name,
+            'amount'        => (float) $contribution->amount,
+            'description'   => $contribution->description,
+            'is_digital'    => (bool) $contribution->is_digital,
+            'location_name' => $contribution->location_name,
+            'date'          => $contribution->created_at->toIso8601String(),
+            'created_at'    => $contribution->created_at->toIso8601String(),
+            'updated_at'    => $contribution->updated_at->toIso8601String(),
         ];
     }
 }

@@ -16,9 +16,7 @@ class SavingGoalController extends Controller
     use ApiResponse;
 
     /**
-     * List all saving goals.
-     *
-     * Returns goals with calculated saved_amount and percentage from contributions.
+     * List all saving goals with location_breakdown per goal.
      */
     public function index(): JsonResponse
     {
@@ -27,18 +25,18 @@ class SavingGoalController extends Controller
 
             $goals = SavingGoal::where('user_id', $user->id)
                 ->withSum('contributions', 'amount')
+                ->with(['contributions:goal_id,amount,is_digital,location_name'])
                 ->get()
                 ->map(function ($goal) {
-                    // Calculate saved amount from contributions only
-                    // (no longer using movements/tags for goal tracking)
                     $savedAmount = $goal->contributions_sum_amount ?? 0;
 
                     $percentage = $goal->target_amount > 0
                         ? round(($savedAmount / $goal->target_amount) * 100, 1)
                         : 0;
 
-                    $goal->saved_amount = (float) $savedAmount;
-                    $goal->percentage = min($percentage, 100);
+                    $goal->saved_amount       = (float) $savedAmount;
+                    $goal->percentage         = min($percentage, 100);
+                    $goal->location_summary   = $this->computeLocationSummary($goal);
 
                     return $goal;
                 });
@@ -54,21 +52,19 @@ class SavingGoalController extends Controller
 
     /**
      * Create a saving goal.
-     *
-     * @bodyParam name string required Goal name. Example: Viaje a Europa
-     * @bodyParam target_amount number required Target amount. Example: 5000000
-     * @bodyParam deadline string optional Target date. Example: 2026-12-31
-     * @bodyParam color string optional Hex color. Example: #3B82F6
-     * @bodyParam emoji string optional Emoji icon. Example: ✈️
      */
     public function store(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'target_amount' => 'required|numeric|min:0',
-            'deadline' => 'nullable|date|after:today',
-            'color' => 'nullable|string|max:7',
-            'emoji' => 'nullable|string|max:10',
+            'name'             => 'required|string|max:255',
+            'target_amount'    => 'required|numeric|min:0',
+            'deadline'         => 'nullable|date|after:today',
+            'color'            => 'nullable|string|max:7',
+            'emoji'            => 'nullable|string|max:10',
+            'cuenta_asociada'  => 'nullable|string|max:100',
+            'money_location'   => 'nullable|string|in:Efectivo,Banco,Nequi/Daviplata,Alcancía,Inversión',
+            'is_digital'       => 'nullable|boolean',
+            'location_name'    => 'nullable|string|max:100',
         ]);
 
         if ($validated->fails()) {
@@ -76,23 +72,26 @@ class SavingGoalController extends Controller
         }
 
         try {
-            $user = Auth::user();
+            $user     = Auth::user();
             $goalName = $request->input('name');
 
-            // Note: We no longer create tags for goals to avoid mixing them with regular tags
-            // Goals are tracked independently via goal_contributions table
             $goal = SavingGoal::create([
-                'user_id' => $user->id,
-                'tag_id' => null, // No longer using tags for goals
-                'name' => $goalName,
-                'target_amount' => $request->input('target_amount'),
-                'deadline' => $request->input('deadline'),
-                'color' => $request->input('color', '#3B82F6'),
-                'emoji' => $request->input('emoji'),
+                'user_id'         => $user->id,
+                'tag_id'          => null,
+                'name'            => $goalName,
+                'target_amount'   => $request->input('target_amount'),
+                'deadline'        => $request->input('deadline'),
+                'color'           => $request->input('color', '#3B82F6'),
+                'emoji'           => $request->input('emoji'),
+                'cuenta_asociada' => $request->input('cuenta_asociada'),
+                'money_location'  => $request->input('money_location', 'Efectivo'),
+                'is_digital'      => $request->input('is_digital', false),
+                'location_name'   => $request->input('location_name'),
             ]);
 
-            $goal->saved_amount = 0;
-            $goal->percentage = 0;
+            $goal->saved_amount      = 0;
+            $goal->percentage        = 0;
+            $goal->location_summary  = [];
 
             return $this->createdResponse(['saving_goal' => $goal], 'Saving goal created successfully');
 
@@ -104,9 +103,7 @@ class SavingGoalController extends Controller
     }
 
     /**
-     * Get a saving goal.
-     *
-     * Returns a single goal with saved_amount and percentage calculated from contributions.
+     * Get a single saving goal with location_breakdown.
      */
     public function show(string $id): JsonResponse
     {
@@ -115,18 +112,18 @@ class SavingGoalController extends Controller
 
             $goal = SavingGoal::where('user_id', $user->id)
                 ->withSum('contributions', 'amount')
+                ->with(['contributions:goal_id,amount,is_digital,location_name'])
                 ->findOrFail($id);
 
-            // Calculate saved amount from contributions only
-            // (no longer using movements/tags for goal tracking)
             $savedAmount = $goal->contributions_sum_amount ?? 0;
 
             $percentage = $goal->target_amount > 0
                 ? round(($savedAmount / $goal->target_amount) * 100, 1)
                 : 0;
 
-            $goal->saved_amount = (float) $savedAmount;
-            $goal->percentage = min($percentage, 100);
+            $goal->saved_amount      = (float) $savedAmount;
+            $goal->percentage        = min($percentage, 100);
+            $goal->location_summary  = $this->computeLocationSummary($goal);
 
             return $this->successResponse($goal);
 
@@ -139,22 +136,19 @@ class SavingGoalController extends Controller
 
     /**
      * Update a saving goal.
-     *
-     * @bodyParam name string optional New name. Example: Fondo de emergencia
-     * @bodyParam target_amount number optional New target. Example: 3000000
-     * @bodyParam deadline string optional New deadline. Example: 2026-06-30
-     * @bodyParam color string optional New color. Example: #10B981
-     * @bodyParam emoji string optional New emoji. Example: 🎯
-     * @bodyParam status string optional Goal status. Example: completed
      */
     public function update(Request $request, string $id): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'name' => 'nullable|string|max:255',
-            'target_amount' => 'nullable|numeric|min:0',
-            'deadline' => 'nullable|date|after:today',
-            'color' => 'nullable|string|max:7',
-            'emoji' => 'nullable|string|max:10',
+            'name'            => 'nullable|string|max:255',
+            'target_amount'   => 'nullable|numeric|min:0',
+            'deadline'        => 'nullable|date|after:today',
+            'color'           => 'nullable|string|max:7',
+            'emoji'           => 'nullable|string|max:10',
+            'cuenta_asociada' => 'nullable|string|max:100',
+            'money_location'  => 'nullable|string|in:Efectivo,Banco,Nequi/Daviplata,Alcancía,Inversión',
+            'is_digital'      => 'nullable|boolean',
+            'location_name'   => 'nullable|string|max:100',
         ]);
 
         if ($validated->fails()) {
@@ -165,46 +159,31 @@ class SavingGoalController extends Controller
             $user = Auth::user();
             $goal = SavingGoal::where('user_id', $user->id)->findOrFail($id);
 
-            if ($request->has('name')) {
-                $goal->name = $request->input('name');
-                // No longer updating tags since goals don't use them anymore
-            }
-
-            if ($request->has('target_amount')) {
-                $goal->target_amount = $request->input('target_amount');
-            }
-
-            if ($request->has('deadline')) {
-                $goal->deadline = $request->input('deadline');
-            }
-
-            if ($request->has('color')) {
-                $goal->color = $request->input('color');
-            }
-
-            if ($request->has('emoji')) {
-                $goal->emoji = $request->input('emoji');
-            }
-
-            if ($request->has('status')) {
-                $goal->status = $request->input('status');
-            }
+            if ($request->has('name'))            $goal->name            = $request->input('name');
+            if ($request->has('target_amount'))   $goal->target_amount   = $request->input('target_amount');
+            if ($request->has('deadline'))         $goal->deadline        = $request->input('deadline');
+            if ($request->has('color'))            $goal->color           = $request->input('color');
+            if ($request->has('emoji'))            $goal->emoji           = $request->input('emoji');
+            if ($request->has('cuenta_asociada'))  $goal->cuenta_asociada = $request->input('cuenta_asociada');
+            if ($request->has('money_location'))   $goal->money_location  = $request->input('money_location');
+            if ($request->has('is_digital'))       $goal->is_digital      = $request->input('is_digital');
+            if ($request->has('location_name'))    $goal->location_name   = $request->input('location_name');
+            if ($request->has('status'))           $goal->status          = $request->input('status');
 
             $goal->save();
 
-            // Reload with contributions sum
             $goal->loadSum('contributions', 'amount');
+            $goal->load(['contributions:goal_id,amount,is_digital,location_name']);
 
-            // Calculate saved amount from contributions only
-            // (no longer using movements/tags for goal tracking)
             $savedAmount = $goal->contributions_sum_amount ?? 0;
 
             $percentage = $goal->target_amount > 0
                 ? round(($savedAmount / $goal->target_amount) * 100, 1)
                 : 0;
 
-            $goal->saved_amount = (float) $savedAmount;
-            $goal->percentage = min($percentage, 100);
+            $goal->saved_amount      = (float) $savedAmount;
+            $goal->percentage        = min($percentage, 100);
+            $goal->location_summary  = $this->computeLocationSummary($goal);
 
             return $this->successResponse(['saving_goal' => $goal], 'Saving goal updated successfully');
 
@@ -233,5 +212,30 @@ class SavingGoalController extends Controller
 
             return $this->errorResponse($this->safeMessage($e));
         }
+    }
+
+    private function computeLocationSummary(SavingGoal $goal): array
+    {
+        $contributions = $goal->relationLoaded('contributions')
+            ? $goal->contributions
+            : $goal->contributions()->get(['goal_id', 'amount', 'is_digital', 'location_name']);
+
+        return $contributions
+            ->groupBy(function ($c) {
+                if ($c->is_digital) {
+                    $name = trim((string) ($c->location_name ?? ''));
+                    return $name !== '' ? $name : 'Digital';
+                }
+                return 'Efectivo';
+            })
+            ->map(function ($group, $label) {
+                return [
+                    'location' => $label,
+                    'total'    => round((float) $group->sum('amount'), 2),
+                ];
+            })
+            ->sortByDesc('total')
+            ->values()
+            ->toArray();
     }
 }
