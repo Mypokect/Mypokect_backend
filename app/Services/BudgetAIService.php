@@ -80,35 +80,39 @@ class BudgetAIService
             : ', "suggested_tags": ["tag1"]';
 
         $prompt = <<<PROMPT
-INSTRUCCIÓN CRÍTICA: Responde ÚNICAMENTE con un JSON válido y puro. Sin texto previo, sin explicaciones, sin Markdown, sin bloques de código (```json o ```). El primer carácter de tu respuesta DEBE ser '{' y el último '}'.
+ROL: Eres un planificador financiero experto especializado en finanzas personales latinoamericanas. Creas presupuestos realistas basados en patrones de gasto del mundo real para distintos tipos de planes.
 
-ROL: Eres un planificador financiero experto que crea presupuestos realistas basados en patrones de gasto del mundo real.
+CONTEXTO: El usuario está planificando un evento de tipo "$planType" y necesita distribuir un monto total en categorías prácticas y específicas. La distribución debe reflejar proporciones reales de gasto, no partes iguales.
 
-TAREA: Genera un presupuesto estructurado para un plan tipo "$planType".
+OBJETIVO: Generar un presupuesto estructurado con entre 3 y 7 categorías que sumen EXACTAMENTE $amount.
 
-INPUT:
+CONDICIONES:
+- Responde ÚNICAMENTE con JSON válido y puro. El primer carácter DEBE ser '{' y el último '}'.
+- Sin texto previo, sin explicaciones, sin Markdown, sin bloques de código.
+- Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
+- La SUMA de todos los amounts DEBE ser exactamente $amount — distribución lógica, NUNCA partes iguales.
+- Infiere la intención real del plan y usa patrones de gasto reales para ese tipo de evento.
+- No uses la categoría "Otros" a menos que sea estrictamente necesario.
+- general_advice: UNA frase corta y estratégica, específica para el tipo de plan.
+{$tagsInstruction}
+
+CONVERSIONES DE TIEMPO:
+| Expresión    | Días |
+|--------------|------|
+| "5 días"     | 5    |
+| "semana"     | 7    |
+| "quincena"   | 15   |
+| "mes"        | 30   |
+| Sin mención  | 30   |
+
+suggested_period: "weekly" (≤7d) | "biweekly" (8-15d) | "monthly" (16-31d) | "custom" (>31d)
+
+ENTRADA:
 - título: "$title"
 - descripción: "$description"
 - monto total: $amount
 
-REGLAS:
-1. Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
-2. Categorías: entre 3 y 7, prácticas, específicas y sin solapamiento.
-3. Cada categoría lleva: name (string), amount (number), reason (2-5 palabras concretas).
-4. La SUMA de todos los amount DEBE ser EXACTAMENTE igual a $amount. Distribución lógica, no partes iguales.
-5. Infiere la intención real del plan (viaje, evento, compra, proyecto, etc.) y usa patrones de gasto reales para ese tipo.
-6. No inventes categorías genéricas como "Otros" salvo que sea estrictamente necesario.
-{$tagsInstruction}
-
-LÓGICA DE TIEMPO:
-- Infiere duración del contexto: "5 días"→5, "mes"→30, "quincena"→15, "semana"→7.
-- suggested_period: "weekly" (≤7d), "biweekly" (8-15d), "monthly" (16-31d), "custom" (>31d).
-- duration_days: entero. Default 30 si no es claro.
-
-CONSEJO:
-- general_advice: UNA frase corta, estratégica, relacionada al plan.
-
-OUTPUT — JSON puro, sin texto adicional:
+FORMATO DE SALIDA (JSON puro, primer carácter '{', sin texto adicional):
 {
   "categories": [
     { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
@@ -251,22 +255,41 @@ PROMPT;
     public function interpretVoiceCommand(string $text): array
     {
         $prompt = <<<PROMPT
-INSTRUCCIÓN CRÍTICA: Responde ÚNICAMENTE con un JSON válido y puro. Sin texto previo, sin Markdown, sin bloques de código. El primer carácter debe ser '{'.
+ROL: Eres un parser de texto financiero en español latinoamericano. Tu única función es extraer el nombre y el monto de un gasto descrito en lenguaje natural.
 
-ROL: Parser de texto financiero que extrae datos de gastos de lenguaje natural.
+CONTEXTO: El usuario dicta o escribe un gasto de forma casual, usando abreviaturas, jerga local, o expresiones coloquiales. El texto puede ser muy corto (2-3 palabras) o más elaborado.
 
-TAREA: Extrae exactamente UN gasto (nombre y monto) del texto del usuario.
+OBJETIVO: Extraer exactamente UN gasto (nombre y monto) del texto del usuario.
 
-INPUT: "$text"
+CONDICIONES:
+- Responde ÚNICAMENTE con JSON puro. El primer carácter DEBE ser '{'.
+- Sin Markdown, sin bloques de código, sin texto adicional.
+- Si hay múltiples gastos → extrae solo el primero mencionado.
+- Si no se detecta monto → amount = 0.
+- amount debe ser un número entero positivo (sin decimales ni comas).
+- name debe ser limpio: sin montos, sin artículos innecesarios, primera letra mayúscula.
 
-REGLAS:
-1. Convierte abreviaturas: "k"→×1000, "mil"→×1000, "millón/millones"→×1000000.
-2. El amount debe ser un entero positivo (sin decimales).
-3. El name debe ser limpio: sin montos, sin artículos innecesarios, primera letra mayúscula.
-4. Si hay múltiples gastos, extrae solo el primero.
-5. Si no se detecta monto, amount = 0.
+CONVERSIONES DE MONTOS:
+| Expresión            | Factor      |
+|----------------------|-------------|
+| k                    | ×1.000      |
+| mil                  | ×1.000      |
+| luca / lucas         | ×1.000      |
+| millón / millones    | ×1.000.000  |
+| palo / palos         | ×1.000.000  |
 
-OUTPUT — JSON puro:
+EJEMPLOS:
+| Entrada                      | name              | amount   |
+|------------------------------|-------------------|----------|
+| "Arriendo 900k"              | "Arriendo"        | 900000   |
+| "Mercado 150 mil"            | "Mercado"         | 150000   |
+| "Gasolina 80 lucas"          | "Gasolina"        | 80000    |
+| "Pasajes aéreos 2 millones"  | "Pasajes aéreos"  | 2000000  |
+| "Netflix"                    | "Netflix"         | 0        |
+
+ENTRADA: "$text"
+
+FORMATO DE SALIDA (JSON puro, sin texto adicional):
 {"name": "", "amount": 0}
 PROMPT;
 

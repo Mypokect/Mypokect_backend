@@ -53,7 +53,7 @@ class MovementAIService
 
             // Call Groq API
             Log::debug('Calling Groq API for voice suggestion');
-            $response = $this->callGroqAPI($prompt, 0.1);
+            $response = $this->callGroqAPI($prompt, 0.1, null, true);
 
             if (! $response) {
                 Log::error('Empty response from Groq API — all models failed');
@@ -298,54 +298,65 @@ class MovementAIService
         ]);
 
         $prompt = <<<PROMPT
-ROLE: You are a financial transaction extractor for a Colombian personal finance app. Convert voice/text input into structured JSON.
+ROL: Eres un extractor de transacciones financieras para una app colombiana de finanzas personales. Tu única función es convertir texto o voz coloquial en un JSON estructurado de una sola transacción.
 
-TASK: Extract exactly one transaction from the input below.
+CONTEXTO: El usuario habla en español colombiano informal. Puede usar jerga local, abreviaturas numéricas, o expresiones regionales. La entrada es siempre imprecisa — tu trabajo es interpretarla con máxima precisión.
 
-CRITICAL RULES:
-- Return JSON ONLY. No explanations, no markdown, no extra text.
-- NEVER return null. If you cannot confidently extract amount or action, return the template with empty/zero fields and set error_type to "insufficient_data".
-- Detect the language. ALL text fields (description, suggested_tag) must match that language.
+OBJETIVO: Extraer exactamente UNA transacción del texto de entrada y devolverla como JSON puro.
 
-COLOMBIAN SLANG DICTIONARY (apply before parsing):
-- "luca" / "lucas" = 1,000 pesos (e.g., "50 lucas" = 50000)
-- "palo" / "palos" = 1,000,000 pesos (e.g., "2 palos" = 2000000)
-- "me cayó" / "me entró" / "me llegó" / "me pagaron" / "me depositaron" = received money → type: income
-- "gasté" / "pagué" / "compré" / "me cobró" / "me salió" = spent money → type: expense
-- "guardé" / "aparté" / "ahorré" / "le metí a" = saving → check goals
-- "plin" / "nequi" / "daviplata" / "transfiya" = digital payment_method
-- "en efectivo" / "en billete" / "en plata física" / "en cash" = payment_method: cash
-- "factura" / "rut" / "factura electrónica" / "fe" = has_invoice: true
+CONDICIONES:
+- NUNCA devuelvas Markdown, bloques de código, texto explicativo, ni nada fuera del JSON puro.
+- El primer carácter de tu respuesta DEBE ser '{' y el último '}'.
+- NUNCA uses null en ningún campo — usa los valores por defecto del template si no puedes extraer un valor.
+- Si no puedes determinar el monto O la descripción con certeza → devuelve el template con campos vacíos/cero y error_type: "insufficient_data".
+- El idioma de description y suggested_tag debe coincidir con el idioma del texto de entrada.
 
-RENT_TYPE CLASSIFICATION (income movements only — apply in this priority order):
-1. laboral  → "sueldo" | "salario" | "nómina" | "nomina" | "pago de nómina" | "quincena" | "quincena de" | "me pagaron el sueldo" | "pago laboral" | "contrato"
-2. honorarios → "honorarios" | "consultoría" | "consultoria" | "freelance" | "servicios profesionales" | "factura de servicios" | "pago de servicios"
-3. capital   → "arriendo" | "arrendamiento" | "alquiler" | "intereses" | "rendimientos" | "dividendos" | "rentó" | "renta pasiva"
-4. comercial → "venta" | "vendí" | "negocio" | "mercancía" | "mercancia" | "local" | "facturé" | "factura de venta" | "caja" | "caja del día"
-5. otros     → any income not matching the above
+DICCIONARIO DE JERGA COLOMBIANA (aplica ANTES de parsear números):
+| Término                                          | Significado                              |
+|--------------------------------------------------|------------------------------------------|
+| luca / lucas                                     | ×1.000 pesos ("50 lucas" = 50.000)       |
+| palo / palos                                     | ×1.000.000 pesos ("2 palos" = 2.000.000) |
+| k / mil                                          | ×1.000                                   |
+| millón / millones                                | ×1.000.000                               |
+| me cayó / me entró / me llegó / me pagaron       | recibí dinero → type: income             |
+| me depositaron                                   | recibí dinero → type: income             |
+| gasté / pagué / compré / me cobró / me salió     | dinero gastado → type: expense           |
+| guardé / aparté / ahorré / le metí a             | ahorro → revisar metas                   |
+| plin / nequi / daviplata / transfiya             | payment_method: digital                  |
+| en efectivo / en billete / en plata física / cash | payment_method: cash                    |
+| factura / rut / fe / factura electrónica         | has_invoice: true                        |
+| quincena                                         | pago laboral de 15 días → rent_type: laboral |
 
-INPUT:
-Transcription: "$transcription"
-User tags: [$tagsList]
-User goals: [$goalsList]
+CLASIFICACIÓN rent_type (solo ingresos — orden de prioridad):
+1. laboral   → sueldo, salario, nómina, quincena, pago de nómina, contrato, pago laboral
+2. honorarios → honorarios, consultoría, freelance, servicios profesionales, factura de servicios
+3. capital   → arriendo, arrendamiento, intereses, rendimientos, dividendos, renta pasiva
+4. comercial → venta, vendí, negocio, mercancía, local, factura de venta, caja del día
+5. otros     → cualquier ingreso que no encaje en los anteriores
 
-DECISION LOGIC:
-- Money spent/paid/bought → type: "expense"
-- Money received/earned/salary → type: "income"
-- Goals: ONLY set suggested_tag to "Meta: <name>" when ALL 3 are true: (1) not an expense, (2) explicit saving verb present, (3) a matching goal exists in the list above.
+LÓGICA DE DECISIÓN:
+- Verbo de gasto → type: "expense", rent_type: null
+- Verbo de ingreso → type: "income", clasifica rent_type según tabla anterior
+- Meta: SOLO pon suggested_tag "Meta: <nombre>" si las 3 condiciones son verdaderas: (1) no es expense, (2) hay verbo explícito de ahorro, (3) existe una meta con ese nombre en la lista de metas del usuario
 
-FIELD RULES:
-amount: numeric only. Apply slang dictionary above. "k"=1000, "mil"=1000, "millón"=1000000. Default: 0.
-description: 2–4 word summary. No numbers. Same language as input.
-type: "expense" | "income".
-payment_method: "cash" only for explicit cash words. Otherwise "digital".
-suggested_tag: Classify by SERVICE or ACTIVITY (not object names). Use existing tag if 90%+ match. Otherwise one generic category word.
-has_invoice: true only if invoice words present. Otherwise false.
-rent_type: Income only → "laboral" | "honorarios" | "capital" | "comercial" | "otros". Null for expenses.
-error_type: null if extraction succeeded. "insufficient_data" if amount is 0 AND description is empty (could not understand the command).
+EJEMPLOS:
 
-OUTPUT (return this exact structure, fill the fields):
-{"amount": 0, "description": "", "type": "expense", "payment_method": "digital", "suggested_tag": "", "has_invoice": false, "rent_type": null, "error_type": null}
+Entrada: "gasté 50 lucas en el super"
+Salida: {"amount":50000,"description":"Compra supermercado","type":"expense","payment_method":"digital","suggested_tag":"Mercado","has_invoice":false,"rent_type":null,"error_type":null}
+
+Entrada: "me llegó la quincena, 2 palos y medio"
+Salida: {"amount":2500000,"description":"Quincena laboral","type":"income","payment_method":"digital","suggested_tag":"Salario","has_invoice":false,"rent_type":"laboral","error_type":null}
+
+Entrada: "pagué el arriendo 900"
+Salida: {"amount":900000,"description":"Pago arriendo","type":"expense","payment_method":"digital","suggested_tag":"Vivienda","has_invoice":false,"rent_type":null,"error_type":null}
+
+ENTRADA REAL:
+Transcripción: "$transcription"
+Tags del usuario: [$tagsList]
+Metas del usuario: [$goalsList]
+
+FORMATO DE SALIDA (JSON puro, sin texto adicional):
+{"amount":0,"description":"","type":"expense","payment_method":"digital","suggested_tag":"","has_invoice":false,"rent_type":null,"error_type":null}
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -371,22 +382,31 @@ PROMPT;
         $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
 
         $prompt = <<<PROMPT
-ROLE: Transaction categorizer. Assigns one spending category tag.
+ROL: Eres un clasificador de transacciones financieras. Tu única función es asignar una etiqueta de categoría a una transacción.
 
-TASK: Return ONE tag that classifies this transaction by service or activity type.
+CONTEXTO: El usuario lleva finanzas personales. Las etiquetas son categorías de gasto como "Comida", "Transporte", "Salud". Si el usuario ya tiene una etiqueta parecida, debe reutilizarse exactamente como está.
 
-RULES:
-- Output the tag word ONLY. No JSON, no explanation, no punctuation.
-- Tag language must match the description language.
-- Classify by what the money was spent on (service/activity).
-- If an existing tag fits semantically → use it exactly.
-- If none fits → return one new generic category word.
-- NEVER return product names, brand names, or object names.
+OBJETIVO: Devolver UNA SOLA palabra que clasifique esta transacción por tipo de servicio o actividad.
 
-INPUT:
-Description: "$description"
-Amount: $amount
-Existing tags: [$tagsList]
+CONDICIONES:
+- Devuelve SOLO la etiqueta. Sin JSON, sin explicaciones, sin puntuación, sin texto adicional.
+- El idioma de la etiqueta debe coincidir con el idioma de la descripción.
+- Clasifica por QUÉ se gastó el dinero (servicio/actividad), NUNCA por producto, marca u objeto.
+- Si una etiqueta existente encaja semánticamente al 90%+ → úsala exactamente como está escrita.
+- Si ninguna encaja → devuelve una nueva palabra genérica que describa la actividad.
+
+EJEMPLOS:
+| Descripción           | Etiqueta correcta | Etiqueta INCORRECTA |
+|-----------------------|-------------------|---------------------|
+| "almuerzo ejecutivo"  | Comida            | Almuerzo            |
+| "taxi al aeropuerto"  | Transporte        | Taxi                |
+| "camiseta adidas"     | Ropa              | Camiseta            |
+| "consulta médico"     | Salud             | Médico              |
+
+ENTRADA:
+Descripción: "$description"
+Monto: $amount
+Etiquetas existentes: [$tagsList]
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -397,7 +417,7 @@ PROMPT;
     /**
      * Call Groq API with fallback to multiple models.
      */
-    protected function callGroqAPI(string $prompt, float $temperature = 0.1, ?int $maxTokens = null): ?string
+    protected function callGroqAPI(string $prompt, float $temperature = 0.1, ?int $maxTokens = null, bool $useJsonMode = false): ?string
     {
         Log::debug('=== CALL GROQ API ===');
         Log::debug('Parameters', [
@@ -417,8 +437,8 @@ PROMPT;
                     'temperature' => $temperature,
                 ];
 
-                // Add response format for JSON requests (voice suggestions)
-                if (str_contains(strtolower($prompt), 'json only')) {
+                // Add response format for JSON requests
+                if ($useJsonMode) {
                     $payload['response_format'] = ['type' => 'json_object'];
                     Log::debug('JSON response format enabled');
                 }
@@ -643,33 +663,33 @@ PROMPT;
         $movementsText = implode("\n", $movementsList);
 
         $prompt = <<<PROMPT
-ROLE: You are a budget expense classifier. You assign individual movements to budget categories.
+ROL: Eres un analista de presupuesto personal. Tu función es asignar cada movimiento individual a su categoría de presupuesto correcta.
 
-TASK: Classify each movement into exactly one budget category. Return JSON only.
+CONTEXTO: El usuario tiene un presupuesto con categorías predefinidas. Cada movimiento tiene una etiqueta (tag) general y una descripción específica. La misma etiqueta puede corresponder a categorías distintas según la descripción del movimiento.
 
-INPUT:
-Categories: [$categoriesList]
-Movements:
+OBJETIVO: Asignar cada movimiento (identificado por su índice) a exactamente UNA categoría de presupuesto.
+
+CONDICIONES:
+- La DESCRIPCIÓN tiene mayor prioridad que el nombre del tag para la clasificación.
+- Si la descripción dice "sin descripción" → usa el nombre del tag para matching semántico.
+- Cada movimiento va a exactamente UNA categoría (la más específica que corresponda).
+- TODAS las categorías deben aparecer en el JSON de salida (usa [] si ningún movimiento le corresponde).
+- Usa los nombres EXACTOS de las categorías (sensible a mayúsculas/minúsculas).
+- Responde SOLO con el JSON. Sin explicaciones, sin Markdown, sin texto adicional.
+
+EJEMPLOS AMBIGUOS (mismo tag, categorías distintas):
+- [0] Tag:"Servicio" Desc:"hotel marriott"     → categoría "Hospedaje"
+- [1] Tag:"Servicio" Desc:"taxi al centro"     → categoría "Transporte"
+- [2] Tag:"Varios"   Desc:"almuerzo ejecutivo" → categoría "Comida"
+- [3] Tag:"Varios"   Desc:"sin descripción"    → categoría más similar al nombre del tag
+
+ENTRADA:
+Categorías: [$categoriesList]
+Movimientos (formato [índice] Tag: "..." | Desc: "..." | $monto):
 $movementsText
 
-DECISION LOGIC:
-1. DESCRIPTION has higher priority than TAG name.
-2. If description is empty ("sin descripción") → use the TAG name for semantic matching.
-3. Same TAG can go to DIFFERENT categories if descriptions differ:
-   - [0] Tag:"Servicio" Desc:"hotel marriott" → Hospedaje
-   - [1] Tag:"Servicio" Desc:"taxi centro" → Transporte
-4. If multiple categories could fit → choose the most specific one.
-5. Each movement goes to exactly ONE category.
-
-RULES:
-- Use EXACT category names (case-sensitive).
-- ALL categories must appear in output (use [] if no movements match).
-- Return JSON only. No explanations.
-
-OUTPUT:
-{"CategoryName": [0, 5, 12], "OtherCategory": [1, 3], "EmptyCategory": []}
-
-Values are arrays of movement indices [idx].
+FORMATO DE SALIDA (JSON puro, valores = arrays de índices de movimientos):
+{"NombreCategoria": [0, 5, 12], "OtraCategoria": [1, 3], "CategoriaVacia": []}
 PROMPT;
 
         Log::info('Llamando a Groq para analizar movimientos individuales', [
@@ -677,7 +697,7 @@ PROMPT;
             'categories_count' => count($categories),
         ]);
 
-        $response = $this->callGroqAPI($prompt, 0.2, 1500);
+        $response = $this->callGroqAPI($prompt, 0.2, 1500, true);
 
         if (!$response) {
             Log::warning('No se recibió respuesta de Groq - usando fallback de matching simple');
@@ -816,34 +836,36 @@ PROMPT;
         $tagsList = implode("\n", $tagsInfo);
 
         $prompt = <<<PROMPT
-ROLE: You are a budget tag classifier. You assign user spending tags to budget categories.
+ROL: Eres un clasificador de etiquetas de gasto personal. Tu función es agrupar etiquetas del usuario dentro de categorías de presupuesto.
 
-TASK: Assign each tag to the single best-matching budget category. Return JSON only.
+CONTEXTO: El usuario usa etiquetas para clasificar sus movimientos. Las descripciones de las transacciones revelan el tipo real de gasto y son más confiables que el nombre de la etiqueta.
 
-INPUT:
-Categories: [$categoriesList]
-Tags with spending data:
+OBJETIVO: Asignar cada etiqueta de gasto a la categoría de presupuesto que mejor la representa.
+
+CONDICIONES:
+- Las DESCRIPCIONES tienen mayor prioridad que el nombre de la etiqueta.
+- Si una etiqueta tiene descripciones mixtas → asígnala a la categoría predominante.
+- Si no hay descripciones → usa el nombre de la etiqueta para matching semántico.
+- Cada etiqueta va a exactamente UNA categoría (la más específica).
+- Si una etiqueta no encaja en ninguna categoría → no la incluyas en el output.
+- TODAS las categorías deben aparecer en el JSON de salida (usa [] si ninguna etiqueta corresponde).
+- Usa nombres EXACTOS de categorías (sensible a mayúsculas/minúsculas). Solo JSON, sin explicaciones.
+
+EJEMPLOS:
+- Tag "Varios" + descripciones ["almuerzo", "cena"]     → "Comida" (descripciones revelan el tipo real)
+- Tag "Servicio" + descripciones ["hotel marriott"]     → "Hospedaje"
+- Tag "Uber" + sin descripciones                        → "Transporte" (matching semántico por nombre)
+
+ENTRADA:
+Categorías: [$categoriesList]
+Etiquetas con datos de gasto:
 $tagsList
 
-DECISION LOGIC:
-1. DESCRIPTIONS have higher priority than tag name:
-   - Tag "Varios" with descriptions ["almuerzo", "cena"] → Comida (descriptions reveal true type)
-   - Tag "Servicio" with descriptions ["hotel marriott"] → Hospedaje
-2. If NO descriptions → use tag name with semantic matching.
-3. If descriptions are MIXED types → assign to the predominant type.
-4. Each tag goes to exactly ONE category (best match).
-5. If a tag does not fit ANY category → do not include it.
-
-RULES:
-- Use EXACT category names (case-sensitive).
-- ALL categories must appear in output (use [] if no tags match).
-- Return JSON only. No explanations.
-
-OUTPUT:
-{"Hospedaje": ["Hotel", "Servicio"], "Transporte": ["Uber"], "Comida": ["Varios"], "EmptyCategory": []}
+FORMATO DE SALIDA (JSON puro, valores = arrays de nombres de etiquetas):
+{"Hospedaje": ["Hotel", "Servicio"], "Transporte": ["Uber"], "Comida": ["Varios"], "CategoriaVacia": []}
 PROMPT;
 
-        $response = $this->callGroqAPI($prompt, 0.2, 1000);
+        $response = $this->callGroqAPI($prompt, 0.2, 1000, true);
 
         if (! $response) {
             return [];
