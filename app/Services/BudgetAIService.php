@@ -80,43 +80,44 @@ class BudgetAIService
             : ', "suggested_tags": ["tag1"]';
 
         $prompt = <<<PROMPT
-        ROL: Eres un planificador financiero experto que crea presupuestos realistas basados en patrones de gasto del mundo real.
+INSTRUCCIÓN CRÍTICA: Responde ÚNICAMENTE con un JSON válido y puro. Sin texto previo, sin explicaciones, sin Markdown, sin bloques de código (```json o ```). El primer carácter de tu respuesta DEBE ser '{' y el último '}'.
 
-        TAREA: Genera un presupuesto estructurado para un plan tipo "$planType".
+ROL: Eres un planificador financiero experto que crea presupuestos realistas basados en patrones de gasto del mundo real.
 
-        INPUT:
-        - título: "$title"
-        - descripción: "$description"
-        - monto total: $amount
+TAREA: Genera un presupuesto estructurado para un plan tipo "$planType".
 
-        REGLAS:
-        1. Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
-        2. Categorías: entre 3 y 7, prácticas, específicas y sin solapamiento.
-        3. Cada categoría lleva: name (string), amount (number), reason (2-5 palabras concretas).
-        4. La SUMA de todos los amount DEBE ser EXACTAMENTE igual a $amount. Distribución lógica, no partes iguales.
-        5. Infiere la intención real del plan (viaje, evento, compra, proyecto, etc.) y usa patrones de gasto reales para ese tipo.
-        6. No inventes categorías genéricas como "Otros" salvo que sea estrictamente necesario.
-        {$tagsInstruction}
+INPUT:
+- título: "$title"
+- descripción: "$description"
+- monto total: $amount
 
-        LÓGICA DE TIEMPO:
-        - Infiere duración del contexto: "5 días"→5, "mes"→30, "quincena"→15, "semana"→7.
-        - suggested_period: "weekly" (≤7d), "biweekly" (8-15d), "monthly" (16-31d), "custom" (>31d).
-        - duration_days: entero. Default 30 si no es claro.
+REGLAS:
+1. Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
+2. Categorías: entre 3 y 7, prácticas, específicas y sin solapamiento.
+3. Cada categoría lleva: name (string), amount (number), reason (2-5 palabras concretas).
+4. La SUMA de todos los amount DEBE ser EXACTAMENTE igual a $amount. Distribución lógica, no partes iguales.
+5. Infiere la intención real del plan (viaje, evento, compra, proyecto, etc.) y usa patrones de gasto reales para ese tipo.
+6. No inventes categorías genéricas como "Otros" salvo que sea estrictamente necesario.
+{$tagsInstruction}
 
-        CONSEJO:
-        - general_advice: UNA frase corta, estratégica, relacionada al plan.
+LÓGICA DE TIEMPO:
+- Infiere duración del contexto: "5 días"→5, "mes"→30, "quincena"→15, "semana"→7.
+- suggested_period: "weekly" (≤7d), "biweekly" (8-15d), "monthly" (16-31d), "custom" (>31d).
+- duration_days: entero. Default 30 si no es claro.
 
-        OUTPUT — JSON válido, sin texto adicional:
-        {
-          "categories": [
-            { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
-          ],
-          "general_advice": "",
-          "suggested_period": "monthly",
-          "duration_days": 30
-        }
+CONSEJO:
+- general_advice: UNA frase corta, estratégica, relacionada al plan.
 
-        PROMPT;
+OUTPUT — JSON puro, sin texto adicional:
+{
+  "categories": [
+    { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
+  ],
+  "general_advice": "",
+  "suggested_period": "monthly",
+  "duration_days": 30
+}
+PROMPT;
 
         $models = ['llama-3.1-8b-instant', 'gemma2-9b-it', 'llama3-8b-8192'];
 
@@ -143,7 +144,7 @@ class BudgetAIService
                     }
 
                     $contentString = $data['choices'][0]['message']['content'];
-                    $content = json_decode($contentString, true);
+                    $content = $this->safeJsonDecode($contentString);
 
                     if (isset($content['categories']) && is_array($content['categories']) && count($content['categories']) > 0) {
 
@@ -212,28 +213,62 @@ class BudgetAIService
     }
 
     /**
+     * Extrae JSON puro de una respuesta de IA que puede contener Markdown u otro texto.
+     * Intenta primero un json_decode directo; si falla, extrae el bloque {...} más externo.
+     */
+    private function safeJsonDecode(string $content): ?array
+    {
+        // Happy path: respuesta ya es JSON válido
+        $decoded = json_decode($content, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            return $decoded;
+        }
+
+        // Fallback: limpiar bloques de código Markdown y extraer {...}
+        $cleaned = preg_replace('/```(?:json)?\s*/i', '', $content);
+        $cleaned = preg_replace('/```\s*/m', '', $cleaned);
+        $cleaned = trim($cleaned);
+
+        $start = strpos($cleaned, '{');
+        $end   = strrpos($cleaned, '}');
+
+        if ($start !== false && $end !== false && $end > $start) {
+            $jsonStr = substr($cleaned, $start, $end - $start + 1);
+            $decoded = json_decode($jsonStr, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                Log::warning('BudgetAIService: JSON extracted via markdown-strip fallback');
+                return $decoded;
+            }
+        }
+
+        Log::error('BudgetAIService: safeJsonDecode failed', ['raw' => substr($content, 0, 200)]);
+        return null;
+    }
+
+    /**
      * Interpreta un comando de voz o texto corto para extraer nombre y monto.
      */
     public function interpretVoiceCommand(string $text): array
     {
         $prompt = <<<PROMPT
-        ROL: Eres un parser de texto financiero que extrae datos de gastos de lenguaje natural.
+INSTRUCCIÓN CRÍTICA: Responde ÚNICAMENTE con un JSON válido y puro. Sin texto previo, sin Markdown, sin bloques de código. El primer carácter debe ser '{'.
 
-        TAREA: Extrae exactamente UN gasto (nombre y monto) del texto del usuario.
+ROL: Parser de texto financiero que extrae datos de gastos de lenguaje natural.
 
-        INPUT: "$text"
+TAREA: Extrae exactamente UN gasto (nombre y monto) del texto del usuario.
 
-        REGLAS:
-        1. Convierte abreviaturas numéricas: "k"→×1000, "mil"→×1000, "millón/millones"→×1000000.
-        2. El amount debe ser un entero positivo (sin decimales).
-        3. El name debe ser limpio: sin montos, sin artículos innecesarios, primera letra mayúscula.
-        4. Si hay múltiples gastos en el texto, extrae solo el primero.
-        5. Si no se detecta monto, amount = 0.
+INPUT: "$text"
 
-        OUTPUT — JSON válido, sin texto adicional:
-        {"name": "", "amount": 0}
+REGLAS:
+1. Convierte abreviaturas: "k"→×1000, "mil"→×1000, "millón/millones"→×1000000.
+2. El amount debe ser un entero positivo (sin decimales).
+3. El name debe ser limpio: sin montos, sin artículos innecesarios, primera letra mayúscula.
+4. Si hay múltiples gastos, extrae solo el primero.
+5. Si no se detecta monto, amount = 0.
 
-        PROMPT;
+OUTPUT — JSON puro:
+{"name": "", "amount": 0}
+PROMPT;
 
         try {
             $response = Http::withHeaders([
@@ -248,19 +283,21 @@ class BudgetAIService
 
             if ($response->successful()) {
                 $content = $response['choices'][0]['message']['content'];
-
-                return json_decode($content, true);
+                $decoded = $this->safeJsonDecode($content);
+                if ($decoded !== null) {
+                    return $decoded;
+                }
             }
         } catch (\Exception $e) {
             Log::error('Groq Voice Error: '.$e->getMessage());
         }
 
-        // Fallback si falla la IA (intentar sacar números a la fuerza)
+        // Fallback numérico si la IA falla
         preg_match_all('/\d+/', $text, $matches);
         $amount = isset($matches[0][0]) ? (float) $matches[0][0] : 0;
 
         return [
-            'name' => trim(str_replace($amount, '', $text)),
+            'name'   => trim(str_replace((string) $amount, '', $text)),
             'amount' => $amount,
         ];
     }

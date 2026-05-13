@@ -214,7 +214,8 @@ class BudgetController extends Controller
     /**
      * Get a single budget.
      *
-     * Returns the budget with its categories, validation status, and categories total.
+     * Returns the budget with its categories enriched with real execution data
+     * (monto_gastado, monto_restante, porcentaje_progreso, estado_color).
      */
     public function getBudget(Budget $budget): JsonResponse
     {
@@ -229,8 +230,13 @@ class BudgetController extends Controller
 
             $budget->load('categories');
 
+            $enrichedCategories = $this->enrichCategoriesWithExecution($budget);
+
+            $budgetData = $budget->toArray();
+            $budgetData['categories'] = $enrichedCategories;
+
             return $this->successResponse([
-                'budget' => $budget,
+                'budget' => $budgetData,
                 'is_valid' => $budget->isValid(),
                 'categories_total' => $budget->getCategoriesTotal(),
             ]);
@@ -805,13 +811,21 @@ class BudgetController extends Controller
             $totalSpent = array_sum($spentPerCat);
 
             foreach ($categories as $idx => $cat) {
-                $spent = round($spentPerCat[$idx], 2);
+                $spent     = round($spentPerCat[$idx], 2);
+                $budgeted  = (float) $cat->amount;
+                $remaining = round($budgeted - $spent, 2);
+                $progress  = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
+
                 $categoriesData[] = [
-                    'name'      => $cat->name,
-                    'budgeted'  => (float) $cat->amount,
-                    'spent'     => $spent,
-                    'remaining' => round((float) $cat->amount - $spent, 2),
-                    'movements' => $movementsPerCat[$idx],
+                    'name'                => $cat->name,
+                    'budgeted'            => $budgeted,
+                    'spent'               => $spent,
+                    'remaining'           => $remaining,
+                    'monto_gastado'       => $spent,
+                    'monto_restante'      => $remaining,
+                    'porcentaje_progreso' => $progress,
+                    'estado_color'        => $this->estadoColor($spent, $budgeted),
+                    'movements'           => $movementsPerCat[$idx],
                 ];
             }
 
@@ -1219,6 +1233,85 @@ class BudgetController extends Controller
             Log::error('Error applying AI tags: '.$e->getMessage());
             return $this->errorResponse($this->safeMessage($e));
         }
+    }
+
+    /**
+     * Returns 'green' (<75%), 'yellow' (75-99%), 'red' (>=100%) based on spend ratio.
+     */
+    private function estadoColor(float $spent, float $budgeted): string
+    {
+        if ($budgeted <= 0) return 'green';
+        $ratio = $spent / $budgeted;
+        if ($ratio >= 1.0) return 'red';
+        if ($ratio >= 0.75) return 'yellow';
+        return 'green';
+    }
+
+    /**
+     * Enriches budget categories with real execution data using linked_tags and budget dates.
+     * Used by getBudget (show) so the detail view gets spending data in a single request.
+     */
+    private function enrichCategoriesWithExecution(Budget $budget): array
+    {
+        $categories = $budget->categories->values()->all();
+
+        // No dates → return categories with zeroed execution fields
+        if (! $budget->date_from) {
+            return array_map(function ($cat) {
+                $data = $cat->toArray();
+                $data['monto_gastado']       = 0.0;
+                $data['monto_restante']      = (float) $cat->amount;
+                $data['porcentaje_progreso'] = 0.0;
+                $data['estado_color']        = 'green';
+                return $data;
+            }, $categories);
+        }
+
+        $from   = $budget->date_from->format('Y-m-d').' 00:00:00';
+        $to     = min($budget->date_to ?? now(), now())->format('Y-m-d').' 23:59:59';
+        $userId = $budget->user_id;
+
+        // Build tag → first category index map (simple, no keyword disambiguation)
+        $tagToCatIdx = [];
+        foreach ($categories as $idx => $cat) {
+            foreach ($this->extractTagNames($cat->linked_tags ?? []) as $tag) {
+                if (! isset($tagToCatIdx[$tag])) {
+                    $tagToCatIdx[$tag] = $idx;
+                }
+            }
+        }
+
+        $spentPerCat = array_fill(0, count($categories), 0.0);
+
+        if (! empty($tagToCatIdx)) {
+            $movements = Movement::where('user_id', $userId)
+                ->where('type', 'expense')
+                ->whereBetween('created_at', [$from, $to])
+                ->whereHas('tag', fn ($q) => $q->whereIn('name', array_keys($tagToCatIdx)))
+                ->with('tag:id,name')
+                ->get(['amount', 'tag_id']);
+
+            foreach ($movements as $mov) {
+                $tagName = $mov->tag?->name;
+                if ($tagName && isset($tagToCatIdx[$tagName])) {
+                    $spentPerCat[$tagToCatIdx[$tagName]] += (float) $mov->amount;
+                }
+            }
+        }
+
+        return array_map(function ($cat, $idx) use ($spentPerCat) {
+            $spent     = round($spentPerCat[$idx], 2);
+            $budgeted  = (float) $cat->amount;
+            $remaining = round($budgeted - $spent, 2);
+            $progress  = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
+
+            $data = $cat->toArray();
+            $data['monto_gastado']       = $spent;
+            $data['monto_restante']      = $remaining;
+            $data['porcentaje_progreso'] = $progress;
+            $data['estado_color']        = $this->estadoColor($spent, $budgeted);
+            return $data;
+        }, $categories, array_keys($categories));
     }
 
     /**
