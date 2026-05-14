@@ -284,212 +284,110 @@ class MovementAIService
     }
 
     /**
-     * Build optimized prompt for VOICE MOVEMENT EXTRACTION ONLY.
-     * Extracts COMPLETE movement context from voice transcription.
-     * OPTIMIZED: 32% less tokens (-190 tokens vs 280).
+     * Build the voice movement extraction prompt.
+     * Extracts: amount, type, description, payment_method, has_invoice,
+     *           is_business_expense, rent_type, suggested_tag, error_type.
      */
     protected function buildVoiceMovementPrompt(string $transcription, string $tagsList, string $goalsList): string
     {
-        Log::debug('=== BUILD VOICE MOVEMENT PROMPT ===');
-        Log::debug('Input', [
-            'transcription_length' => strlen($transcription),
-            'tags_list_length' => strlen($tagsList),
-            'goals_list_length' => strlen($goalsList),
-        ]);
-
         $prompt = <<<PROMPT
-You are a financial transaction parser for a Colombian personal finance app.
+You are a financial transaction extractor for informal Colombian Spanish.
+Respond ONLY with a single valid JSON object. No markdown, no explanation, no extra text.
 
-TASK:
-Extract EXACTLY ONE financial transaction from informal Colombian Spanish.
+INPUT: "$transcription"
 
-INPUT:
-"$transcription"
+USER TAGS (reuse one if it fits): $tagsList
+USER GOALS (if money goes toward a goal, prefix tag with "Meta:"): $goalsList
 
-USER CONTEXT:
-- Available tags: [$tagsList]
-- Available goals: [$goalsList]
+--- EXTRACTION RULES ---
 
-CORE RULES:
-- Return ONLY raw valid JSON.
-- Response MUST start with '{' and end with '}'.
-- No markdown.
-- No explanations.
-- No extra text.
-- Never return arrays.
-- Never return multiple transactions.
+1. TYPE
+   "income"  = money received (llegó, pagaron, cobré, quincena, sueldo, abono, ingresó)
+   "expense" = money spent (gasté, pagué, compré, transferí, mandé, salió)
+   Default: "expense"
 
-PRIMARY OBJECTIVE:
-Correctly identify:
-1. transaction type
-2. amount
-3. description
+2. AMOUNT — convert slang to number:
+   luca / lucas = 1000
+   k / K        = 1000   (e.g. "30k" = 30000)
+   palo / palos = 1000000
+   millón / millones = 1000000
+   medio palo   = 500000
+   If no amount found: set amount=0 and error_type="insufficient_data"
 
-If amount OR intent cannot be confidently detected:
-- return the default template
-- set error_type = "insufficient_data"
+3. DESCRIPTION
+   Short phrase (max 5 words) describing what happened. Same language as input.
+   Examples: "Almuerzo en restaurante", "Gasolina carro", "Quincena trabajo"
 
-TRANSACTION TYPES:
-- expense → user spent money
-- income → user received money
+4. SUGGESTED_TAG
+   Pick the single most relevant tag from USER TAGS above, or create a 1–2 word category.
+   If it's a goal contribution, use "Meta: <goal name>".
+   Examples: "Comida", "Transporte", "Meta: Carro nuevo"
 
-DEFAULT ASSUMPTIONS:
-- payment_method = "digital"
-- has_invoice = false
-- is_business_expense = false
-- rent_type = null
-- error_type = null
+5. PAYMENT_METHOD
+   "digital" = nequi, daviplata, transfiya, transferencia, tarjeta, app, bancolombia, bbva
+   "cash"    = efectivo, billetes, plata física, en mano
+   Default: "digital"
 
-COLOMBIAN NUMBER SLANG:
-- luca / lucas = ×1,000
-- palo / palos = ×1,000,000
-- k = ×1,000
-- millón / millones = ×1,000,000
+6. HAS_INVOICE
+   true  = factura, fe, fce, recibo, boleta, IVA, electrónica
+   false = everything else
+   Default: false
 
-INTENT DETECTION:
+7. IS_BUSINESS_EXPENSE
+   true  = gasto de trabajo, empresa, negocio, deducible, cliente
+   false = everything else
+   Default: false
 
-EXPENSE VERBS:
-- gasté
-- pagué
-- compré
-- me cobró
-- me salió
+8. RENT_TYPE (only for income, else null)
+   "laboral"    = sueldo, salario, quincena, nómina, contrato laboral
+   "honorarios" = honorarios, freelance, consultoría, servicios profesionales
+   "capital"    = arriendo, intereses, dividendos, inversión, rendimientos
+   "comercial"  = venta, negocio, tienda, mercancía, comercio
+   "otros"      = any other income that doesn't fit above
+   If type="expense": always null
 
-INCOME VERBS:
-- me llegó
-- me entró
-- me pagaron
-- me depositaron
-- recibí
+9. ERROR_TYPE
+   Set "insufficient_data" if: amount=0 OR the input is unclear/incomplete.
+   Otherwise: null
 
-PAYMENT METHOD:
-- nequi / daviplata / plin / transfiya → digital
-- efectivo / cash / billete → cash
-
-INVOICE:
-- factura
-- factura electrónica
-- FE
-- RUT
-→ has_invoice = true
-
-BUSINESS EXPENSE:
-Set true ONLY if explicitly work/business related.
-
-DESCRIPTION RULES:
-Generate a SHORT natural description based on the purchase or income.
-
-Examples:
-- "50 mil en comida" → "Comida"
-- "compré mercado" → "Mercado"
-- "me llegó la quincena" → "Quincena laboral"
-
-INCOME CLASSIFICATION:
-- laboral
-- honorarios
-- capital
-- comercial
-- otros
-
-OUTPUT FORMAT:
-{
-  "amount": 0,
-  "description": "",
-  "type": "expense",
-  "payment_method": "digital",
-  "suggested_tag": "",
-  "has_invoice": false,
-  "is_business_expense": false,
-  "rent_type": null,
-  "error_type": null
-}
-
-VALIDATION:
-- amount must be numeric
-- detect Colombian currency expressions correctly
-- extract only ONE transaction
-- ensure valid JSON
+--- OUTPUT FORMAT (fill every field) ---
+{"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"","error_type":null}
 PROMPT;
 
-        Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
+        Log::debug('Voice prompt built', ['prompt_length' => strlen($prompt)]);
 
         return $prompt;
     }
 
     /**
-     * Build optimized prompt for TAG SUGGESTION ONLY.
-     * Returns ONLY the tag name, not the full movement context.
-     * OPTIMIZED: 54% less tokens vs previous version (160 tokens).
+     * Build the tag suggestion prompt.
+     * Returns ONLY one tag name — no JSON, no explanation.
      */
     protected function buildTagPrompt(string $description, float $amount, array $existingTags, string $language): string
     {
-        Log::debug('=== BUILD TAG PROMPT ===');
-        Log::debug('Input', [
-            'description' => $description,
-            'amount' => $amount,
-            'tags_count' => count($existingTags),
-            'language' => $language,
-        ]);
-
-        $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
+        $tagsLine = empty($existingTags) ? 'none' : implode(', ', $existingTags);
+        $lang     = $language === 'es' ? 'Spanish' : 'English';
 
         $prompt = <<<PROMPT
-You are a financial transaction category classifier.
+You are a financial transaction categorizer.
+Respond with ONE tag name only. No punctuation. No explanation. No JSON.
 
-TASK:
-Assign ONE category label to a financial transaction.
+Transaction: "$description" (\$$amount)
+Existing tags: $tagsLine
+Output language: $lang
 
-INPUT:
-- description: "$description"
-- amount: $amount
-- existing_tags: [$tagsList]
+Rules:
+- Reuse an existing tag if it clearly matches the purpose.
+- If no existing tag fits, create a 1–2 word category in $lang.
+- Match by PURPOSE, not brand or object.
+  "almuerzo ejecutivo" → Comida
+  "taxi aeropuerto"    → Transporte
+  "camiseta nike"      → Ropa
+  "consulta médica"    → Salud
+  "recarga celular"    → Telecomunicaciones
 
-RULES:
-- Return ONLY the category label.
-- No JSON.
-- No punctuation.
-- No explanations.
-- No extra words.
-- Output must contain only ONE label.
-
-CLASSIFICATION LOGIC:
-- Categorize by the PURPOSE of the expense.
-- NEVER categorize by product name, brand, or specific object.
-
-GOOD EXAMPLES:
-- "almuerzo ejecutivo" → "Comida"
-- "taxi al aeropuerto" → "Transporte"
-- "camiseta adidas" → "Ropa"
-- "consulta médica" → "Salud"
-
-BAD EXAMPLES:
-- "Almuerzo"
-- "Taxi"
-- "Camiseta"
-- "Doctor"
-
-EXISTING TAG REUSE:
-- If an existing tag clearly matches the transaction purpose, reuse it EXACTLY as written.
-- Prioritize semantic reuse over creating new tags.
-
-NEW TAG RULES:
-- If no existing tag matches:
-  - create a SHORT generic category
-  - maximum 1 or 2 words
-  - broad activity/service category
-  - avoid overly specific labels
-
-LANGUAGE:
-- Match the language of the transaction description.
-
-VALIDATION:
-- Output only ONE final label.
-- No quotes.
-- No periods.
-- No lists.
+Tag:
 PROMPT;
-
-        Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
 
         return $prompt;
     }
@@ -918,36 +816,25 @@ PROMPT;
         $tagsList = implode("\n", $tagsInfo);
 
         $prompt = <<<PROMPT
-ROL: Eres un clasificador de etiquetas de gasto personal. Tu función es agrupar etiquetas del usuario dentro de categorías de presupuesto.
+You are a budget categorization engine.
+Respond ONLY with a valid JSON object. No markdown, no explanation.
 
-CONTEXTO: El usuario usa etiquetas para clasificar sus movimientos. Las descripciones de las transacciones revelan el tipo real de gasto y son más confiables que el nombre de la etiqueta.
+TASK: Assign each spending tag to exactly ONE budget category.
 
-OBJETIVO: Asignar cada etiqueta de gasto a la categoría de presupuesto que mejor la representa.
+Budget categories: [$categoriesList]
 
-CONDICIONES:
-- Las DESCRIPCIONES tienen mayor prioridad que el nombre de la etiqueta.
-- Si una etiqueta tiene descripciones mixtas → asígnala a la categoría predominante.
-- Si no hay descripciones → usa el nombre de la etiqueta para matching semántico.
-- Cada etiqueta va a exactamente UNA categoría (la más específica).
-- Si una etiqueta no encaja en ninguna categoría → no la incluyas en el output.
-- TODAS las categorías deben aparecer en el JSON de salida (usa [] si ninguna etiqueta corresponde).
-- Usa nombres EXACTOS de categorías (sensible a mayúsculas/minúsculas). Solo JSON, sin explicaciones.
-
-EJEMPLOS:
-- Tag "Varios" + descripciones ["almuerzo", "cena"]     → "Comida" (descripciones revelan el tipo real)
-- Tag "Servicio" + descripciones ["hotel marriott"]     → "Hospedaje"
-- Tag "Uber" + sin descripciones                        → "Transporte" (matching semántico por nombre)
-
-ENTRADA:
-Categorías: [$categoriesList]
-Etiquetas con datos de gasto:
+Spending tags with amounts and sample descriptions:
 $tagsList
 
-FORMATO DE SALIDA (JSON puro, valores = arrays de nombres de etiquetas):
-{"Hospedaje": ["Hotel", "Servicio"], "Transporte": ["Uber"], "Comida": ["Varios"], "CategoriaVacia": []}
+Rules:
+- Each tag goes to the ONE most semantically similar category.
+- All categories must appear in the output (use [] if none match).
+- Use exact category names as keys (case-sensitive).
+- Match by PURPOSE not by brand or product name.
+- Output format: {"CategoryName": ["Tag1", "Tag2"], "OtherCategory": []}
 PROMPT;
 
-        $response = $this->callGroqAPI($prompt, 0.2, 1000, true);
+        $response = $this->callGroqAPI($prompt, 0.1, 1000, true);
 
         if (! $response) {
             return [];
