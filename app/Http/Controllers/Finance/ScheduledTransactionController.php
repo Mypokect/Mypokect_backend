@@ -140,6 +140,17 @@ class ScheduledTransactionController extends Controller
         }
         $transaction = Auth::user()->scheduledTransactions()->create($validator->validated());
 
+        // Pre-create the initial occurrence so the calendar reflects the entry immediately.
+        // The index() also calculates this dynamically, but persisting it guarantees
+        // the transaction appears even before the first calendar query for that month.
+        $transaction->occurrences()->updateOrCreate(
+            [
+                'scheduled_transaction_id' => $transaction->id,
+                'due_date'                 => $validator->validated()['start_date'],
+            ],
+            ['is_paid' => false]
+        );
+
         return $this->createdResponse($transaction);
     }
 
@@ -187,7 +198,39 @@ class ScheduledTransactionController extends Controller
      * Update a scheduled transaction.
      */
     public function update(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
-    { /* ... lógica de actualización ... */
+    {
+        $this->authorizeOwner($scheduledTransaction);
+
+        $validator = Validator::make($request->all(), [
+            'title'                => 'sometimes|string|max:255',
+            'amount'               => 'sometimes|numeric|min:0',
+            'type'                 => 'sometimes|string|in:expense,income',
+            'category'             => 'nullable|string|max:100',
+            'start_date'           => 'sometimes|date_format:Y-m-d',
+            'recurrence_type'      => 'sometimes|string|in:none,daily,weekly,monthly,yearly',
+            'recurrence_interval'  => 'nullable|integer|min:1',
+            'end_date'             => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+            'reminder_days_before' => 'nullable|integer|min:0',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationErrorResponse($validator->errors());
+        }
+
+        $scheduledTransaction->update($validator->validated());
+
+        // If start_date changed, upsert the initial occurrence for the new date.
+        if ($request->has('start_date')) {
+            $scheduledTransaction->occurrences()->updateOrCreate(
+                [
+                    'scheduled_transaction_id' => $scheduledTransaction->id,
+                    'due_date'                 => $validator->validated()['start_date'],
+                ],
+                ['is_paid' => false]
+            );
+        }
+
+        return $this->successResponse($scheduledTransaction->fresh());
     }
 
     /**

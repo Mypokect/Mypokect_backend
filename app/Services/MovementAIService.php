@@ -310,6 +310,7 @@ CONDICIONES:
 - NUNCA uses null en ningún campo — usa los valores por defecto del template si no puedes extraer un valor.
 - Si no puedes determinar el monto O la descripción con certeza → devuelve el template con campos vacíos/cero y error_type: "insufficient_data".
 - El idioma de description y suggested_tag debe coincidir con el idioma del texto de entrada.
+- is_business_expense: true SOLO si el gasto es claramente profesional/empresarial (ej. "compré materiales para el trabajo", "alquiler de oficina", "herramientas del negocio"). Default: false.
 
 DICCIONARIO DE JERGA COLOMBIANA (aplica ANTES de parsear números):
 | Término                                          | Significado                              |
@@ -342,13 +343,13 @@ LÓGICA DE DECISIÓN:
 EJEMPLOS:
 
 Entrada: "gasté 50 lucas en el super"
-Salida: {"amount":50000,"description":"Compra supermercado","type":"expense","payment_method":"digital","suggested_tag":"Mercado","has_invoice":false,"rent_type":null,"error_type":null}
+Salida: {"amount":50000,"description":"Compra supermercado","type":"expense","payment_method":"digital","suggested_tag":"Mercado","has_invoice":false,"is_business_expense":false,"rent_type":null,"error_type":null}
 
 Entrada: "me llegó la quincena, 2 palos y medio"
-Salida: {"amount":2500000,"description":"Quincena laboral","type":"income","payment_method":"digital","suggested_tag":"Salario","has_invoice":false,"rent_type":"laboral","error_type":null}
+Salida: {"amount":2500000,"description":"Quincena laboral","type":"income","payment_method":"digital","suggested_tag":"Salario","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","error_type":null}
 
-Entrada: "pagué el arriendo 900"
-Salida: {"amount":900000,"description":"Pago arriendo","type":"expense","payment_method":"digital","suggested_tag":"Vivienda","has_invoice":false,"rent_type":null,"error_type":null}
+Entrada: "compré materiales de construcción para el proyecto de la empresa, 800 lucas"
+Salida: {"amount":800000,"description":"Materiales empresa","type":"expense","payment_method":"digital","suggested_tag":"Empresa","has_invoice":false,"is_business_expense":true,"rent_type":null,"error_type":null}
 
 ENTRADA REAL:
 Transcripción: "$transcription"
@@ -356,7 +357,7 @@ Tags del usuario: [$tagsList]
 Metas del usuario: [$goalsList]
 
 FORMATO DE SALIDA (JSON puro, sin texto adicional):
-{"amount":0,"description":"","type":"expense","payment_method":"digital","suggested_tag":"","has_invoice":false,"rent_type":null,"error_type":null}
+{"amount":0,"description":"","type":"expense","payment_method":"digital","suggested_tag":"","has_invoice":false,"is_business_expense":false,"rent_type":null,"error_type":null}
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -553,15 +554,16 @@ PROMPT;
 
             $suggestedTag = $this->normalizeTag($data);
             $result = [
-                'description'    => $parsedDescription ?: 'Movimiento',
-                'amount'         => $parsedAmount,
-                'suggested_tag'  => $suggestedTag,
-                'type'           => $type,
-                'payment_method' => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
-                'has_invoice'    => (bool) ($data['has_invoice'] ?? false),
-                'rent_type'      => $rentType,
-                'is_goal'        => str_starts_with($suggestedTag, 'Meta:'),
-                'error_type'     => null,
+                'description'        => $parsedDescription ?: 'Movimiento',
+                'amount'             => $parsedAmount,
+                'suggested_tag'      => $suggestedTag,
+                'type'               => $type,
+                'payment_method'     => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
+                'has_invoice'        => (bool) ($data['has_invoice'] ?? false),
+                'is_business_expense'=> (bool) ($data['is_business_expense'] ?? false),
+                'rent_type'          => $rentType,
+                'is_goal'            => str_starts_with($suggestedTag, 'Meta:'),
+                'error_type'         => null,
             ];
 
             Log::debug('Normalization completed', [
@@ -594,15 +596,16 @@ PROMPT;
     private function insufficientDataResponse(): array
     {
         return [
-            'description'    => '',
-            'amount'         => 0,
-            'suggested_tag'  => '',
-            'type'           => 'expense',
-            'payment_method' => 'digital',
-            'has_invoice'    => false,
-            'rent_type'      => null,
-            'is_goal'        => false,
-            'error_type'     => 'insufficient_data',
+            'description'         => '',
+            'amount'              => 0,
+            'suggested_tag'       => '',
+            'type'                => 'expense',
+            'payment_method'      => 'digital',
+            'has_invoice'         => false,
+            'is_business_expense' => false,
+            'rent_type'           => null,
+            'is_goal'             => false,
+            'error_type'          => 'insufficient_data',
         ];
     }
 
