@@ -298,66 +298,117 @@ class MovementAIService
         ]);
 
         $prompt = <<<PROMPT
-ROL: Eres un extractor de transacciones financieras para una app colombiana de finanzas personales. Tu única función es convertir texto o voz coloquial en un JSON estructurado de una sola transacción.
+You are a financial transaction parser for a Colombian personal finance app.
 
-CONTEXTO: El usuario habla en español colombiano informal. Puede usar jerga local, abreviaturas numéricas, o expresiones regionales. La entrada es siempre imprecisa — tu trabajo es interpretarla con máxima precisión.
+TASK:
+Extract EXACTLY ONE financial transaction from informal Colombian Spanish.
 
-OBJETIVO: Extraer exactamente UNA transacción del texto de entrada y devolverla como JSON puro.
+INPUT:
+"$transcription"
 
-CONDICIONES:
-- NUNCA devuelvas Markdown, bloques de código, texto explicativo, ni nada fuera del JSON puro.
-- El primer carácter de tu respuesta DEBE ser '{' y el último '}'.
-- NUNCA uses null en ningún campo — usa los valores por defecto del template si no puedes extraer un valor.
-- Si no puedes determinar el monto O la descripción con certeza → devuelve el template con campos vacíos/cero y error_type: "insufficient_data".
-- El idioma de description y suggested_tag debe coincidir con el idioma del texto de entrada.
-- is_business_expense: true SOLO si el gasto es claramente profesional/empresarial (ej. "compré materiales para el trabajo", "alquiler de oficina", "herramientas del negocio"). Default: false.
+USER CONTEXT:
+- Available tags: [$tagsList]
+- Available goals: [$goalsList]
 
-DICCIONARIO DE JERGA COLOMBIANA (aplica ANTES de parsear números):
-| Término                                          | Significado                              |
-|--------------------------------------------------|------------------------------------------|
-| luca / lucas                                     | ×1.000 pesos ("50 lucas" = 50.000)       |
-| palo / palos                                     | ×1.000.000 pesos ("2 palos" = 2.000.000) |
-| k / mil                                          | ×1.000                                   |
-| millón / millones                                | ×1.000.000                               |
-| me cayó / me entró / me llegó / me pagaron       | recibí dinero → type: income             |
-| me depositaron                                   | recibí dinero → type: income             |
-| gasté / pagué / compré / me cobró / me salió     | dinero gastado → type: expense           |
-| guardé / aparté / ahorré / le metí a             | ahorro → revisar metas                   |
-| plin / nequi / daviplata / transfiya             | payment_method: digital                  |
-| en efectivo / en billete / en plata física / cash | payment_method: cash                    |
-| factura / rut / fe / factura electrónica         | has_invoice: true                        |
-| quincena                                         | pago laboral de 15 días → rent_type: laboral |
+CORE RULES:
+- Return ONLY raw valid JSON.
+- Response MUST start with '{' and end with '}'.
+- No markdown.
+- No explanations.
+- No extra text.
+- Never return arrays.
+- Never return multiple transactions.
 
-CLASIFICACIÓN rent_type (solo ingresos — orden de prioridad):
-1. laboral   → sueldo, salario, nómina, quincena, pago de nómina, contrato, pago laboral
-2. honorarios → honorarios, consultoría, freelance, servicios profesionales, factura de servicios
-3. capital   → arriendo, arrendamiento, intereses, rendimientos, dividendos, renta pasiva
-4. comercial → venta, vendí, negocio, mercancía, local, factura de venta, caja del día
-5. otros     → cualquier ingreso que no encaje en los anteriores
+PRIMARY OBJECTIVE:
+Correctly identify:
+1. transaction type
+2. amount
+3. description
 
-LÓGICA DE DECISIÓN:
-- Verbo de gasto → type: "expense", rent_type: null
-- Verbo de ingreso → type: "income", clasifica rent_type según tabla anterior
-- Meta: SOLO pon suggested_tag "Meta: <nombre>" si las 3 condiciones son verdaderas: (1) no es expense, (2) hay verbo explícito de ahorro, (3) existe una meta con ese nombre en la lista de metas del usuario
+If amount OR intent cannot be confidently detected:
+- return the default template
+- set error_type = "insufficient_data"
 
-EJEMPLOS:
+TRANSACTION TYPES:
+- expense → user spent money
+- income → user received money
 
-Entrada: "gasté 50 lucas en el super"
-Salida: {"amount":50000,"description":"Compra supermercado","type":"expense","payment_method":"digital","suggested_tag":"Mercado","has_invoice":false,"is_business_expense":false,"rent_type":null,"error_type":null}
+DEFAULT ASSUMPTIONS:
+- payment_method = "digital"
+- has_invoice = false
+- is_business_expense = false
+- rent_type = null
+- error_type = null
 
-Entrada: "me llegó la quincena, 2 palos y medio"
-Salida: {"amount":2500000,"description":"Quincena laboral","type":"income","payment_method":"digital","suggested_tag":"Salario","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","error_type":null}
+COLOMBIAN NUMBER SLANG:
+- luca / lucas = ×1,000
+- palo / palos = ×1,000,000
+- k = ×1,000
+- millón / millones = ×1,000,000
 
-Entrada: "compré materiales de construcción para el proyecto de la empresa, 800 lucas"
-Salida: {"amount":800000,"description":"Materiales empresa","type":"expense","payment_method":"digital","suggested_tag":"Empresa","has_invoice":false,"is_business_expense":true,"rent_type":null,"error_type":null}
+INTENT DETECTION:
 
-ENTRADA REAL:
-Transcripción: "$transcription"
-Tags del usuario: [$tagsList]
-Metas del usuario: [$goalsList]
+EXPENSE VERBS:
+- gasté
+- pagué
+- compré
+- me cobró
+- me salió
 
-FORMATO DE SALIDA (JSON puro, sin texto adicional):
-{"amount":0,"description":"","type":"expense","payment_method":"digital","suggested_tag":"","has_invoice":false,"is_business_expense":false,"rent_type":null,"error_type":null}
+INCOME VERBS:
+- me llegó
+- me entró
+- me pagaron
+- me depositaron
+- recibí
+
+PAYMENT METHOD:
+- nequi / daviplata / plin / transfiya → digital
+- efectivo / cash / billete → cash
+
+INVOICE:
+- factura
+- factura electrónica
+- FE
+- RUT
+→ has_invoice = true
+
+BUSINESS EXPENSE:
+Set true ONLY if explicitly work/business related.
+
+DESCRIPTION RULES:
+Generate a SHORT natural description based on the purchase or income.
+
+Examples:
+- "50 mil en comida" → "Comida"
+- "compré mercado" → "Mercado"
+- "me llegó la quincena" → "Quincena laboral"
+
+INCOME CLASSIFICATION:
+- laboral
+- honorarios
+- capital
+- comercial
+- otros
+
+OUTPUT FORMAT:
+{
+  "amount": 0,
+  "description": "",
+  "type": "expense",
+  "payment_method": "digital",
+  "suggested_tag": "",
+  "has_invoice": false,
+  "is_business_expense": false,
+  "rent_type": null,
+  "error_type": null
+}
+
+VALIDATION:
+- amount must be numeric
+- detect Colombian currency expressions correctly
+- extract only ONE transaction
+- ensure valid JSON
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
@@ -383,31 +434,59 @@ PROMPT;
         $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
 
         $prompt = <<<PROMPT
-ROL: Eres un clasificador de transacciones financieras. Tu única función es asignar una etiqueta de categoría a una transacción.
+You are a financial transaction category classifier.
 
-CONTEXTO: El usuario lleva finanzas personales. Las etiquetas son categorías de gasto como "Comida", "Transporte", "Salud". Si el usuario ya tiene una etiqueta parecida, debe reutilizarse exactamente como está.
+TASK:
+Assign ONE category label to a financial transaction.
 
-OBJETIVO: Devolver UNA SOLA palabra que clasifique esta transacción por tipo de servicio o actividad.
+INPUT:
+- description: "$description"
+- amount: $amount
+- existing_tags: [$tagsList]
 
-CONDICIONES:
-- Devuelve SOLO la etiqueta. Sin JSON, sin explicaciones, sin puntuación, sin texto adicional.
-- El idioma de la etiqueta debe coincidir con el idioma de la descripción.
-- Clasifica por QUÉ se gastó el dinero (servicio/actividad), NUNCA por producto, marca u objeto.
-- Si una etiqueta existente encaja semánticamente al 90%+ → úsala exactamente como está escrita.
-- Si ninguna encaja → devuelve una nueva palabra genérica que describa la actividad.
+RULES:
+- Return ONLY the category label.
+- No JSON.
+- No punctuation.
+- No explanations.
+- No extra words.
+- Output must contain only ONE label.
 
-EJEMPLOS:
-| Descripción           | Etiqueta correcta | Etiqueta INCORRECTA |
-|-----------------------|-------------------|---------------------|
-| "almuerzo ejecutivo"  | Comida            | Almuerzo            |
-| "taxi al aeropuerto"  | Transporte        | Taxi                |
-| "camiseta adidas"     | Ropa              | Camiseta            |
-| "consulta médico"     | Salud             | Médico              |
+CLASSIFICATION LOGIC:
+- Categorize by the PURPOSE of the expense.
+- NEVER categorize by product name, brand, or specific object.
 
-ENTRADA:
-Descripción: "$description"
-Monto: $amount
-Etiquetas existentes: [$tagsList]
+GOOD EXAMPLES:
+- "almuerzo ejecutivo" → "Comida"
+- "taxi al aeropuerto" → "Transporte"
+- "camiseta adidas" → "Ropa"
+- "consulta médica" → "Salud"
+
+BAD EXAMPLES:
+- "Almuerzo"
+- "Taxi"
+- "Camiseta"
+- "Doctor"
+
+EXISTING TAG REUSE:
+- If an existing tag clearly matches the transaction purpose, reuse it EXACTLY as written.
+- Prioritize semantic reuse over creating new tags.
+
+NEW TAG RULES:
+- If no existing tag matches:
+  - create a SHORT generic category
+  - maximum 1 or 2 words
+  - broad activity/service category
+  - avoid overly specific labels
+
+LANGUAGE:
+- Match the language of the transaction description.
+
+VALIDATION:
+- Output only ONE final label.
+- No quotes.
+- No periods.
+- No lists.
 PROMPT;
 
         Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);

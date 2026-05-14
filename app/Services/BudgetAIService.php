@@ -80,49 +80,71 @@ class BudgetAIService
             : ', "suggested_tags": ["tag1"]';
 
         $prompt = <<<PROMPT
-ROL: Eres un planificador financiero experto especializado en finanzas personales latinoamericanas. Creas presupuestos realistas basados en patrones de gasto del mundo real para distintos tipos de planes.
+        You are a financial planning AI specialized in realistic personal budgeting for Latin American users.
 
-CONTEXTO: El usuario está planificando un evento de tipo "$planType" y necesita distribuir un monto total en categorías prácticas y específicas. La distribución debe reflejar proporciones reales de gasto, no partes iguales.
+        TASK:
+        Generate a realistic budget distribution for a "$planType" plan.
 
-OBJETIVO: Generar un presupuesto estructurado con entre 3 y 7 categorías que sumen EXACTAMENTE $amount.
+        INPUT:
+        - title: "$title"
+        - description: "$description"
+        - total_amount: $amount
 
-CONDICIONES:
-- Responde ÚNICAMENTE con JSON válido y puro. El primer carácter DEBE ser '{' y el último '}'.
-- Sin texto previo, sin explicaciones, sin Markdown, sin bloques de código.
-- Idioma: detecta el idioma del título/descripción. Todos los valores de texto van en ese idioma. Las keys JSON siempre en inglés.
-- La SUMA de todos los amounts DEBE ser exactamente $amount — distribución lógica, NUNCA partes iguales.
-- Infiere la intención real del plan y usa patrones de gasto reales para ese tipo de evento.
-- No uses la categoría "Otros" a menos que sea estrictamente necesario.
-- general_advice: UNA frase corta y estratégica, específica para el tipo de plan.
-{$tagsInstruction}
+        RULES:
+        - Return ONLY valid raw JSON.
+        - The response MUST start with '{' and end with '}'.
+        - No markdown.
+        - No explanations.
+        - No extra text.
+        - JSON keys must always be in English.
+        - Detect the user's language from the title/description and write all text values in that language.
+        - Generate between 3 and 7 categories.
+        - Category amounts MUST sum EXACTLY to $amount.
+        - Use realistic spending proportions based on the actual type of event or plan.
+        - NEVER split amounts evenly unless it is genuinely realistic.
+        - Avoid generic categories like "Other" unless absolutely necessary.
+        - Each category must have:
+        - name
+        - amount
+        - reason
+        {$tagsInstruction}
 
-CONVERSIONES DE TIEMPO:
-| Expresión    | Días |
-|--------------|------|
-| "5 días"     | 5    |
-| "semana"     | 7    |
-| "quincena"   | 15   |
-| "mes"        | 30   |
-| Sin mención  | 30   |
+        GENERAL_ADVICE:
+        - Write ONE short strategic recommendation specific to the plan.
 
-suggested_period: "weekly" (≤7d) | "biweekly" (8-15d) | "monthly" (16-31d) | "custom" (>31d)
+        TIME DETECTION:
+        Convert duration mentions into days using these rules:
+        - "day" = 1
+        - "week" = 7
+        - "biweekly" / "fortnight" = 15
+        - "month" = 30
+        - If no duration exists, use 30.
 
-ENTRADA:
-- título: "$title"
-- descripción: "$description"
-- monto total: $amount
+        PERIOD RULES:
+        - <= 7 days → "weekly"
+        - 8-15 days → "biweekly"
+        - 16-31 days → "monthly"
+        - >31 days → "custom"
 
-FORMATO DE SALIDA (JSON puro, primer carácter '{', sin texto adicional):
-{
-  "categories": [
-    { "name": "", "amount": 0, "reason": ""{$suggestedTagsField} }
-  ],
-  "general_advice": "",
-  "suggested_period": "monthly",
-  "duration_days": 30
-}
-PROMPT;
+        OUTPUT FORMAT:
+        {
+        "categories": [
+            {
+            "name": "string",
+            "amount": 0,
+            "reason": "string"{$suggestedTagsField}
+            }
+        ],
+        "general_advice": "string",
+        "suggested_period": "weekly|biweekly|monthly|custom",
+        "duration_days": 30
+        }
 
+        VALIDATION RULES:
+        - Ensure the total sum of all category amounts equals EXACTLY $amount.
+        - Ensure all numeric values are integers unless decimals are required.
+        - Ensure valid JSON syntax.
+        PROMPT;
         $models = ['llama-3.1-8b-instant', 'gemma2-9b-it', 'llama3-8b-8192'];
 
         foreach ($models as $model) {
