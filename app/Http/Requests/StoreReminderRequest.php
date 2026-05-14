@@ -23,6 +23,7 @@ class StoreReminderRequest extends FormRequest
     {
         return [
             'title' => ['required', 'string', 'max:120'],
+            'type' => ['required', 'in:expense,income'],
             'amount' => ['nullable', 'numeric', 'min:0', 'max:999999999.99'],
             'category' => ['nullable', 'string', 'max:60'],
             'note' => ['nullable', 'string', 'max:1000'],

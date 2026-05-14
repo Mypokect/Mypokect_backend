@@ -23,6 +23,7 @@ class UpdateReminderRequest extends FormRequest
     {
         return [
             'title' => ['sometimes', 'string', 'max:120'],
+            'type' => ['sometimes', 'in:expense,income'],
             'amount' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:999999999.99'],
             'category' => ['sometimes', 'nullable', 'string', 'max:60'],
             'note' => ['sometimes', 'nullable', 'string', 'max:1000'],

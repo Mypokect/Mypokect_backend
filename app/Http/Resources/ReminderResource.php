@@ -18,6 +18,7 @@ class ReminderResource extends JsonResource
         return [
             'id' => $this->id,
             'title' => $this->title,
+            'type' => $this->type ?? 'expense',
             'amount' => $this->amount ? (float) $this->amount : null,
             'category' => $this->category,
             'note' => $this->note,
