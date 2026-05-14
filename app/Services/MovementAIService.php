@@ -34,45 +34,54 @@ class MovementAIService
         Log::info('Transcription', ['text' => substr($transcription, 0, 100).'...']);
 
         try {
-            // Get user's existing tags for context
-            Log::debug('Fetching user tags');
             $existingTags = Tag::where('user_id', $user->id)->pluck('name')->toArray();
-            Log::info('Tags found', ['count' => count($existingTags), 'tags' => $existingTags]);
-            $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
+            $savingGoals  = SavingGoal::where('user_id', $user->id)->pluck('name')->toArray();
 
-            // Get user's saving goals for context
-            Log::debug('Fetching user goals');
-            $savingGoals = SavingGoal::where('user_id', $user->id)->pluck('name')->toArray();
-            Log::info('Goals found', ['count' => count($savingGoals), 'goals' => $savingGoals]);
-            $goalsList = empty($savingGoals) ? 'None' : implode(', ', $savingGoals);
+            Log::info('Context loaded', ['tags' => count($existingTags), 'goals' => count($savingGoals)]);
 
-            // Build prompt
-            Log::debug('Building voice movement prompt');
-            $prompt = $this->buildVoiceMovementPrompt($transcription, $tagsList, $goalsList);
-            Log::debug('Prompt built', ['prompt_length' => strlen($prompt)]);
+            // ── Layers 1–3: Cache → Rule engine → Short LLM (<80 tokens) ─────
+            /** @var HybridTransactionParser $parser */
+            $parser = app(HybridTransactionParser::class);
+            $hybrid = $parser->parse($transcription, $existingTags, $savingGoals);
 
-            // Call Groq API
-            Log::debug('Calling Groq API for voice suggestion');
+            Log::info('HybridParser result', [
+                '_source'    => $hybrid['_source'],
+                'amount'     => $hybrid['amount'],
+                'type'       => $hybrid['type'],
+                'error_type' => $hybrid['error_type'],
+            ]);
+
+            if ($hybrid['_source'] !== 'rules_partial') {
+                $result = $this->hybridResultToResponse($hybrid);
+                Log::info('=== SUGGEST FROM VOICE COMPLETED (hybrid) ===', [
+                    'source' => $hybrid['_source'],
+                    'amount' => $result['amount'],
+                    'type'   => $result['type'],
+                ]);
+                return $result;
+            }
+
+            // ── Layer 4: Full LLM (only when hybrid completely failed) ────────
+            Log::info('Hybrid rules_partial — falling back to full LLM prompt');
+
+            $tagsList  = empty($existingTags) ? 'None' : implode(', ', $existingTags);
+            $goalsList = empty($savingGoals)  ? 'None' : implode(', ', $savingGoals);
+            $prompt    = $this->buildVoiceMovementPrompt($transcription, $tagsList, $goalsList);
+
             $response = $this->callGroqAPI($prompt, 0.1, null, true);
 
             if (! $response) {
-                Log::error('Empty response from Groq API — all models failed');
-                Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => null, 'outcome' => 'all_models_failed']);
+                Log::error('Full LLM also failed — returning insufficient_data');
+                Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => null, 'outcome' => 'all_failed']);
                 return $this->insufficientDataResponse();
             }
 
             Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => substr($response, 0, 500)]);
 
-            // Normalize response
-            Log::debug('Normalizing movement suggestion');
             $result = $this->normalizeMovementSuggestion($response);
-
-            Log::info('=== SUGGEST FROM VOICE COMPLETED ===');
-            Log::info('Result', [
+            Log::info('=== SUGGEST FROM VOICE COMPLETED (full LLM) ===', [
                 'amount' => $result['amount'],
-                'type' => $result['type'],
-                'tag' => $result['suggested_tag'],
-                'payment_method' => $result['payment_method'],
+                'type'   => $result['type'],
             ]);
 
             return $result;
@@ -80,8 +89,8 @@ class MovementAIService
         } catch (\Exception $e) {
             Log::error('ERROR in suggestFromVoice — returning insufficient_data', [
                 'error' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
             ]);
             return $this->insufficientDataResponse();
         }
@@ -583,6 +592,27 @@ PROMPT;
             'rent_type'           => null,
             'is_goal'             => false,
             'error_type'          => 'insufficient_data',
+        ];
+    }
+
+    /**
+     * Convert HybridTransactionParser output to the suggestFromVoice response shape.
+     * Adds `is_goal` (absent from the hybrid parser's output).
+     */
+    private function hybridResultToResponse(array $hybrid): array
+    {
+        $tag = $hybrid['suggested_tag'] ?? 'General';
+        return [
+            'description'         => $hybrid['description'],
+            'amount'              => $hybrid['amount'],
+            'suggested_tag'       => $tag,
+            'type'                => $hybrid['type'],
+            'payment_method'      => $hybrid['payment_method'],
+            'has_invoice'         => $hybrid['has_invoice'],
+            'is_business_expense' => $hybrid['is_business_expense'],
+            'rent_type'           => $hybrid['rent_type'],
+            'is_goal'             => str_starts_with($tag, 'Meta:'),
+            'error_type'          => $hybrid['error_type'],
         ];
     }
 
