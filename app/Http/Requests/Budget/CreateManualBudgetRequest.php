@@ -26,12 +26,13 @@ class CreateManualBudgetRequest extends FormRequest
         ];
     }
 
-    protected function failedValidation(Validator $validator)
+    protected function failedValidation(Validator $validator): void
     {
         throw new HttpResponseException(
             response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors(),
+                'status'  => 'error',
+                'message' => 'Datos de presupuesto inválidos',
+                'errors'  => $validator->errors(),
             ], 422)
         );
     }

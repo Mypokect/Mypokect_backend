@@ -340,10 +340,10 @@ class TaxController extends Controller
                 'ingresos_desglosados'    => $ingresosDesglosados,
                 'ingresos_para_auditoria' => $ingresosParaAuditoria,
                 'utilidad_por_bolsa'      => [
-                    'laboral'    => $resultadoPorDefecto['renta_liquida_laboral']    ?? 0,
-                    'honorarios' => $resultadoPorDefecto['renta_liquida_honorarios'] ?? 0,
-                    'capital'    => $resultadoPorDefecto['renta_liquida_capital']    ?? 0,
-                    'comercial'  => $resultadoPorDefecto['renta_liquida_comercial']  ?? 0,
+                    'laboral'    => (float) ($resultadoPorDefecto['renta_liquida_laboral']    ?? 0),
+                    'honorarios' => (float) ($resultadoPorDefecto['renta_liquida_honorarios'] ?? 0),
+                    'capital'    => (float) ($resultadoPorDefecto['renta_liquida_capital']    ?? 0),
+                    'comercial'  => (float) ($resultadoPorDefecto['renta_liquida_comercial']  ?? 0),
                 ],
                 'movimientos_ingreso'     => $ingresosParaAuditoria, // alias retrocompat
                 'movimientos_auditados'   => $movimientosAuditados, // ingresos + gastos FE con tipo y bolsa_actual

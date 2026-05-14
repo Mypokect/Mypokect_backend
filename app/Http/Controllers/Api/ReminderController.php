@@ -5,8 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreReminderRequest;
 use App\Http\Requests\UpdateReminderRequest;
-use App\Http\Resources\ReminderResource;
 use App\Http\Resources\ReminderCollection;
+use App\Http\Resources\ReminderResource;
+use App\Http\Traits\ApiResponse;
 use App\Models\Reminder;
 use App\Services\RecurrenceService;
 use Carbon\Carbon;
@@ -16,6 +17,8 @@ use Illuminate\Support\Facades\Gate;
 
 class ReminderController extends Controller
 {
+    use ApiResponse;
+
     public function __construct(
         private RecurrenceService $recurrenceService
     ) {}
@@ -32,31 +35,28 @@ class ReminderController extends Controller
     public function index(Request $request): ReminderCollection
     {
         $request->validate([
-            'start' => 'required|date',
-            'end' => 'required|date|after_or_equal:start',
+            'start'  => 'required|date',
+            'end'    => 'required|date|after_or_equal:start',
             'status' => 'sometimes|in:pending,paid,all',
         ]);
 
-        $start = Carbon::parse($request->start);
-        $end = Carbon::parse($request->end);
+        $start  = Carbon::parse($request->start);
+        $end    = Carbon::parse($request->end);
         $status = $request->input('status', 'all');
 
-        $query = Reminder::where('user_id', $request->user()->id)
-            ->dateRange($start, $end);
+        $query = Reminder::where('user_id', $request->user()->id)->dateRange($start, $end);
 
         if ($status !== 'all') {
             $query->where('status', $status);
         }
 
-        $reminders = $query->orderBy('due_date', 'asc')->get();
-
-        // For monthly recurring reminders, generate occurrences within range
+        $reminders         = $query->orderBy('due_date', 'asc')->get();
         $expandedReminders = collect();
 
         foreach ($reminders as $reminder) {
             if ($reminder->isMonthlyRecurring() && $reminder->recurrence_params) {
                 $dayOfMonth = $reminder->recurrence_params['dayOfMonth'] ?? null;
-                
+
                 if ($dayOfMonth) {
                     $occurrences = $this->recurrenceService->getOccurrencesInRange(
                         $reminder->due_date,
@@ -66,9 +66,8 @@ class ReminderController extends Controller
                         $end
                     );
 
-                    // Create virtual reminder instances for each occurrence
                     foreach ($occurrences as $occurrenceDate) {
-                        $virtualReminder = clone $reminder;
+                        $virtualReminder           = clone $reminder;
                         $virtualReminder->due_date = $occurrenceDate;
                         $expandedReminders->push($virtualReminder);
                     }
@@ -92,19 +91,15 @@ class ReminderController extends Controller
     {
         Gate::authorize('create', Reminder::class);
 
-        $data = $request->validated();
-        $data['user_id'] = $request->user()->id;
+        $data              = $request->validated();
+        $data['user_id']   = $request->user()->id;
 
-        // Convert due_date to UTC
-        $dueDate = Carbon::parse($data['due_date'], $data['timezone']);
-        $data['due_date'] = $dueDate->setTimezone('UTC');
+        $dueDate           = Carbon::parse($data['due_date'], $data['timezone']);
+        $data['due_date']  = $dueDate->setTimezone('UTC');
 
         $reminder = Reminder::create($data);
 
-        return response()->json([
-            'data' => new ReminderResource($reminder),
-            'message' => 'Recordatorio creado exitosamente.',
-        ], 201);
+        return $this->createdResponse(new ReminderResource($reminder), 'Recordatorio creado exitosamente.');
     }
 
     /**
@@ -126,19 +121,15 @@ class ReminderController extends Controller
 
         $data = $request->validated();
 
-        // Convert due_date to UTC if provided
         if (isset($data['due_date'])) {
-            $timezone = $data['timezone'] ?? $reminder->timezone;
-            $dueDate = Carbon::parse($data['due_date'], $timezone);
+            $timezone         = $data['timezone'] ?? $reminder->timezone;
+            $dueDate          = Carbon::parse($data['due_date'], $timezone);
             $data['due_date'] = $dueDate->setTimezone('UTC');
         }
 
         $reminder->update($data);
 
-        return response()->json([
-            'data' => new ReminderResource($reminder->fresh()),
-            'message' => 'Recordatorio actualizado exitosamente.',
-        ]);
+        return $this->successResponse(new ReminderResource($reminder->fresh()), 'Recordatorio actualizado exitosamente.');
     }
 
     /**
@@ -150,15 +141,11 @@ class ReminderController extends Controller
 
         $reminder->delete();
 
-        return response()->json([
-            'message' => 'Recordatorio eliminado exitosamente.',
-        ]);
+        return $this->deletedResponse('Recordatorio eliminado exitosamente.');
     }
 
     /**
      * Mark a reminder as paid.
-     *
-     * Optionally creates a payment record with the amount and note.
      *
      * @bodyParam occurrence_date string optional Date of the occurrence. Example: 2026-03-15
      * @bodyParam amount_paid number optional Amount paid. Example: 150000
@@ -170,24 +157,20 @@ class ReminderController extends Controller
 
         $request->validate([
             'occurrence_date' => 'sometimes|date',
-            'amount_paid' => 'sometimes|numeric|min:0',
-            'note' => 'sometimes|string|max:1000',
+            'amount_paid'     => 'sometimes|numeric|min:0',
+            'note'            => 'sometimes|string|max:1000',
         ]);
 
         $reminder->update(['status' => 'paid']);
 
-        // Create payment record if amount provided
         if ($request->has('amount_paid')) {
             $reminder->payments()->create([
-                'paid_at' => now(),
+                'paid_at'     => now(),
                 'amount_paid' => $request->amount_paid,
-                'note' => $request->note,
+                'note'        => $request->note,
             ]);
         }
 
-        return response()->json([
-            'data' => new ReminderResource($reminder->fresh()),
-            'message' => 'Recordatorio marcado como pagado.',
-        ]);
+        return $this->successResponse(new ReminderResource($reminder->fresh()), 'Recordatorio marcado como pagado.');
     }
 }

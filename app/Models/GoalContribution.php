@@ -15,10 +15,13 @@ class GoalContribution extends Model
         'goal_id',
         'amount',
         'description',
+        'is_digital',
+        'location_name',
     ];
 
     protected $casts = [
-        'amount' => 'decimal:2',
+        'amount'     => 'decimal:2',
+        'is_digital' => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

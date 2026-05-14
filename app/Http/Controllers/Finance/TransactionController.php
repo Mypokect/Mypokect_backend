@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Finance;
 
 use App\Http\Controllers\Controller;
+use App\Http\Traits\ApiResponse;
 use App\Models\GoalContribution;
 use App\Models\Movement;
 use Illuminate\Http\JsonResponse;
@@ -12,6 +13,8 @@ use Illuminate\Support\Facades\Log;
 
 class TransactionController extends Controller
 {
+    use ApiResponse;
+
     /**
      * Get unified transactions.
      *
@@ -29,154 +32,125 @@ class TransactionController extends Controller
         try {
             $user = Auth::user();
 
-            if (! $user) {
-                return response()->json(['error' => 'Unauthorized'], 401);
-            }
-
             Log::info('Fetching unified transactions', [
                 'user_id' => $user->id,
                 'filters' => $request->all(),
             ]);
 
-            // Parse filters
-            $types = $request->query('type') ? explode(',', $request->query('type')) : ['expense', 'income', 'contribution'];
+            $types     = $request->query('type') ? explode(',', $request->query('type')) : ['expense', 'income', 'contribution'];
             $startDate = $request->query('start_date');
-            $endDate = $request->query('end_date');
-            $goalId = $request->query('goal_id');
-            $perPage = min($request->query('per_page', 50), 100);
-            $page = $request->query('page', 1);
+            $endDate   = $request->query('end_date');
+            $goalId    = $request->query('goal_id');
+            $perPage   = (int) $request->query('per_page', 50);
+            $page      = (int) $request->query('page', 1);
 
-            // Validate per_page
             if (! in_array($perPage, [10, 50, 100])) {
                 $perPage = 50;
             }
 
             $transactions = [];
 
-            // Fetch movements if needed
+            // ── Movements ────────────────────────────────────────────────────
             if (in_array('expense', $types) || in_array('income', $types)) {
-                $movementTypes = [];
-                if (in_array('expense', $types)) {
-                    $movementTypes[] = 'expense';
-                }
-                if (in_array('income', $types)) {
-                    $movementTypes[] = 'income';
-                }
+                $movementTypes = array_intersect(['expense', 'income'], $types);
 
-                $movementQuery = Movement::where('user_id', $user->id)
-                    ->whereIn('type', $movementTypes);
+                $query = Movement::where('user_id', $user->id)
+                    ->whereIn('type', $movementTypes)
+                    ->with('tag');
 
                 if ($startDate) {
-                    $movementQuery->whereDate('created_at', '>=', $startDate);
+                    $query->whereDate('created_at', '>=', $startDate);
                 }
                 if ($endDate) {
-                    $movementQuery->whereDate('created_at', '<=', $endDate);
+                    $query->whereDate('created_at', '<=', $endDate);
                 }
 
-                $movements = $movementQuery->get();
-
-                foreach ($movements as $movement) {
+                foreach ($query->get() as $movement) {
                     $transactions[] = $this->transformMovement($movement);
                 }
             }
 
-            // Fetch goal contributions if needed
+            // ── Goal Contributions ────────────────────────────────────────────
             if (in_array('contribution', $types)) {
-                $contributionQuery = GoalContribution::where('user_id', $user->id);
+                $query = GoalContribution::where('user_id', $user->id)->with('goal');
 
                 if ($goalId) {
-                    $contributionQuery->where('goal_id', $goalId);
+                    $query->where('goal_id', (int) $goalId);
                 }
-
                 if ($startDate) {
-                    $contributionQuery->whereDate('created_at', '>=', $startDate);
+                    $query->whereDate('created_at', '>=', $startDate);
                 }
                 if ($endDate) {
-                    $contributionQuery->whereDate('created_at', '<=', $endDate);
+                    $query->whereDate('created_at', '<=', $endDate);
                 }
 
-                $contributions = $contributionQuery->get();
-
-                foreach ($contributions as $contribution) {
+                foreach ($query->get() as $contribution) {
                     $transactions[] = $this->transformContribution($contribution);
                 }
             }
 
-            // Sort by date (ASC - oldest first) as per requirement
-            usort($transactions, function ($a, $b) {
-                return strtotime($a['date']) - strtotime($b['date']);
-            });
+            // Sort oldest → newest
+            usort($transactions, fn ($a, $b) => strtotime($a['date']) - strtotime($b['date']));
 
-            // Paginate
-            $total = count($transactions);
+            $total    = count($transactions);
             $paginated = array_slice($transactions, ($page - 1) * $perPage, $perPage);
-            $lastPage = ceil($total / $perPage);
+            $lastPage = (int) ceil($total / max(1, $perPage));
 
             Log::info('Unified transactions fetched', [
-                'total' => $total,
-                'page' => $page,
+                'total'    => $total,
+                'page'     => $page,
                 'per_page' => $perPage,
             ]);
 
-            return response()->json([
-                'data' => $paginated,
+            return $this->successResponse([
+                'data'       => $paginated,
                 'pagination' => [
-                    'total' => $total,
-                    'per_page' => $perPage,
+                    'total'        => $total,
+                    'per_page'     => $perPage,
                     'current_page' => $page,
-                    'last_page' => $lastPage,
-                    'from' => (($page - 1) * $perPage) + 1,
-                    'to' => min($page * $perPage, $total),
+                    'last_page'    => $lastPage,
+                    'from'         => $total > 0 ? (($page - 1) * $perPage) + 1 : 0,
+                    'to'           => min($page * $perPage, $total),
                 ],
-            ], 200);
+            ]);
 
         } catch (\Exception $e) {
-            Log::error('Error fetching unified transactions: '.$e->getMessage());
-
-            $message = config('app.debug') ? $e->getMessage() : 'Ocurrió un error interno en el servidor.';
-
-            return response()->json([
-                'error' => 'Error fetching transactions',
-                'message' => $message,
-            ], 500);
+            Log::error('Error fetching unified transactions: ' . $e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
-    /**
-     * Transform Movement to unified transaction format.
-     */
     private function transformMovement(Movement $movement): array
     {
         return [
-            'id' => "m_{$movement->id}",
-            'type' => $movement->type,
-            'type_badge' => $movement->type === 'expense' ? 'Gasto' : 'Ingreso',
-            'amount' => (float) $movement->amount,
-            'description' => $movement->description,
-            'category' => $movement->tag?->name,
-            'goal_name' => null,
-            'date' => $movement->created_at->toIso8601String(),
+            'id'             => "m_{$movement->id}",
+            'type'           => $movement->type,
+            'type_badge'     => $movement->type === 'expense' ? 'Gasto' : 'Ingreso',
+            'amount'         => (float) ($movement->amount ?? 0),
+            'description'    => $movement->description ?? '',
+            'category'       => $movement->tag?->name,
+            'goal_name'      => null,
+            'date'           => $movement->created_at->toIso8601String(),
             'payment_method' => $movement->payment_method,
-            'source' => 'movement',
+            'has_invoice'    => (bool) ($movement->has_invoice ?? false),
+            'source'         => 'movement',
         ];
     }
 
-    /**
-     * Transform GoalContribution to unified transaction format.
-     */
     private function transformContribution(GoalContribution $contribution): array
     {
         return [
-            'id' => "gc_{$contribution->id}",
-            'type' => 'contribution',
-            'type_badge' => 'Abono',
-            'amount' => (float) $contribution->amount,
-            'description' => $contribution->description,
-            'category' => null,
-            'goal_name' => $contribution->goal?->name,
-            'date' => $contribution->created_at->toIso8601String(),
+            'id'             => "gc_{$contribution->id}",
+            'type'           => 'contribution',
+            'type_badge'     => 'Abono',
+            'amount'         => (float) ($contribution->amount ?? 0),
+            'description'    => $contribution->description ?? '',
+            'category'       => null,
+            'goal_name'      => $contribution->goal?->name,
+            'date'           => $contribution->created_at->toIso8601String(),
             'payment_method' => null,
-            'source' => 'goal_contribution',
+            'has_invoice'    => false,
+            'source'         => 'goal_contribution',
         ];
     }
 }

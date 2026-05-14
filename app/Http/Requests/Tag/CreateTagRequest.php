@@ -59,8 +59,9 @@ class CreateTagRequest extends FormRequest
     {
         throw new HttpResponseException(
             response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors(),
+                'status'  => 'error',
+                'message' => 'Datos de etiqueta inválidos',
+                'errors'  => $validator->errors(),
             ], 422)
         );
     }

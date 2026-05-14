@@ -236,7 +236,7 @@ class AuthController extends Controller
      * Get home data.
      *
      * Accepts optional ?month=&year= query params (defaults to current month).
-     * Returns balance, status semáforo, porcentaje_ahorro, salud_financiera y flujo_neto.
+     * Returns balance_total, disponible_para_vivir, flujo_neto, ahorro_mes_pct y salud_financiera.
      */
     public function homeData(Request $request): JsonResponse
     {
@@ -247,8 +247,8 @@ class AuthController extends Controller
         $start = Carbon::create($year, $month, 1)->startOfMonth();
         $end   = Carbon::create($year, $month, 1)->endOfMonth();
 
-        $incomes  = (float) $user->movements()->where('type', 'income') ->whereBetween('created_at', [$start, $end])->sum('amount');
-        $expenses = (float) $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->sum('amount');
+        $incomes  = (float) ($user->movements()->where('type', 'income') ->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
+        $expenses = (float) ($user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
 
         $balance   = $incomes - $expenses;
         $flujoNeto = $balance;
@@ -302,21 +302,126 @@ class AuthController extends Controller
         // ── Salud Financiera (score 0-100 + etiqueta + color) ─────────────────
         $saludFinanciera = $this->calcularSaludFinanciera($incomes, $expenses);
 
+        // Texto corto para mostrar en UI sin lógica en Flutter
+        $saludTexto = match ($saludFinanciera['label']) {
+            'Excelente', 'Muy Bueno' => 'Bolsillo sano',
+            'Bueno'                  => 'Puedes mejorar',
+            'Regular'                => 'Gasto elevado',
+            'Crítico'                => 'Finanzas en riesgo',
+            default                  => 'Sin movimientos',
+        };
+
+        // ── Eficiencia Fiscal ─────────────────────────────────────────────────
+        $totalExpenseCount   = $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->count();
+        $expensesWithInvoice = $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->where('has_invoice', true)->count();
+        $eficienciaFiscal    = $totalExpenseCount > 0 ? round(($expensesWithInvoice / $totalExpenseCount) * 100, 1) : 0.0;
+
+        // ── Categoría de mayor gasto (actual vs mes anterior) ─────────────────
+        $prevStart = $start->copy()->subMonth()->startOfMonth();
+        $prevEnd   = $start->copy()->subMonth()->endOfMonth();
+
+        $topTag = $user->movements()
+            ->leftJoin('tags', 'movements.tag_id', '=', 'tags.id')
+            ->where('movements.type', 'expense')
+            ->whereBetween('movements.created_at', [$start, $end])
+            ->whereNotNull('movements.tag_id')
+            ->whereNotNull('tags.name')
+            ->selectRaw('tags.id as tag_id, tags.name as tag_name, SUM(movements.amount) as total_amount')
+            ->groupBy('tags.id', 'tags.name')
+            ->orderByDesc('total_amount')
+            ->first();
+
+        $alertaGasto = null;
+        if ($topTag) {
+            $tagName      = (string) ($topTag->tag_name ?? '');
+            $currentTotal = (float)  ($topTag->total_amount ?? 0.0);
+            $prevTotal    = (float)  ($user->movements()
+                ->where('type', 'expense')
+                ->whereBetween('created_at', [$prevStart, $prevEnd])
+                ->where('tag_id', $topTag->tag_id)
+                ->sum('amount') ?? 0.0);
+            $alertaGasto = [
+                'categoria'       => $tagName,
+                'monto'           => round($currentTotal, 2),
+                'excede_anterior' => $prevTotal > 0 && $currentTotal > $prevTotal,
+                'variacion_pct'   => $prevTotal > 0 ? round((($currentTotal - $prevTotal) / $prevTotal) * 100, 1) : null,
+            ];
+        }
+
+        // ── Observaciones inteligentes ────────────────────────────────────────
+        $observaciones = $this->generarObservaciones(
+            $incomes, $expenses, $balance, $porcentajeAhorro,
+            $eficienciaFiscal, $alertaGasto, $hasActiveChallenge, $ahorroProtegidoActual
+        );
+
+        // ── Objeto analisis_usuario (Flutter solo mapea, no calcula) ──────────
+        $analisisUsuario = [
+            'health_score'        => $saludFinanciera['score'],
+            'mensaje_diagnostico' => $saludFinanciera['descripcion'],
+            'eficiencia_fiscal'   => $eficienciaFiscal,
+            'alerta_gasto'        => $alertaGasto,
+            'observaciones'       => $observaciones,
+        ];
+
+        // ── Objeto analisis (alias conciso para KPI cards en Flutter) ─────────
+        $nivelAhorro = match(true) {
+            $porcentajeAhorro >= 30 => 'Bestia',
+            $porcentajeAhorro >= 10 => 'Moderado',
+            default                  => 'Bajo',
+        };
+        $consejoIa = match(true) {
+            $balance < 0            => 'Recorta gastos no esenciales esta semana.',
+            $porcentajeAhorro >= 30 => '¡Gran ritmo! Considera invertir tu excedente.',
+            $eficienciaFiscal < 40  => 'Pide factura en tus compras y deduce más.',
+            $hasActiveChallenge     => 'Tu reto de ahorro está activo. ¡No lo abandones!',
+            default                 => 'Mantén el registro de tus gastos diarios.',
+        };
+        $analisis = [
+            'score'           => $saludFinanciera['score'],
+            'nivel_ahorro'    => $nivelAhorro,
+            'facturacion_pct' => $eficienciaFiscal,
+            'consejo_ia'      => $consejoIa,
+        ];
+
+        // ── Distribución de Saldo por Cuenta ─────────────────────────────────
+        $distribucionSaldo = [];
+        try {
+            if (Schema::hasTable('accounts')) {
+                $distribucionSaldo = $user->accounts()
+                    ->select('entidad', 'monto', 'tipo')
+                    ->get()
+                    ->map(fn($a) => [
+                        'entidad' => $a->entidad,
+                        'monto'   => (float) $a->monto,
+                        'tipo'    => $a->tipo,
+                    ])
+                    ->values()
+                    ->toArray();
+            }
+        } catch (\Throwable) {
+            // Tabla aún no migrada — devuelve lista vacía sin romper la respuesta
+        }
+
         return $this->successResponse([
-            'name'                 => $user->name,
-            'balance'              => $balance,
-            'flujo_neto'           => $flujoNeto,
-            'status_label'         => $statusLabel,
-            'status_color'         => $statusColor,
-            'icon_type'            => $iconType,
-            'porcentaje_ahorro'    => $porcentajeAhorro,
-            'salud_financiera'     => $saludFinanciera,
-            // Reto de Ahorro + Alcancía con Fuga — Flutter mapea directamente
-            'has_active_challenge'    => $hasActiveChallenge,
-            'ahorro_reservado_mes'    => $ahorroReservadoMes,
-            'ahorro_protegido_actual' => $ahorroProtegidoActual,
-            'dinero_fugado_mes'       => $dineroFugadoMes,
-            'disponible_para_vivir'   => $disponibleParaVivir,
+            'name'                    => $user->name ?? '',
+            'balance_total'           => (float) $balance,
+            'flujo_neto'              => (float) $flujoNeto,
+            'ahorro_reservado'        => (float) $ahorroReservadoMes,
+            'disponible_para_vivir'   => (float) $disponibleParaVivir,
+            'status_label'            => $statusLabel,
+            'status_color'            => $statusColor,
+            'icon_type'               => $iconType,
+            'ahorro_mes_pct'          => (float) $porcentajeAhorro,
+            'porcentaje_ahorro'       => (float) $porcentajeAhorro,
+            'salud_financiera'        => $saludFinanciera,
+            'salud_texto'             => $saludTexto,
+            'has_active_challenge'    => (bool)  $hasActiveChallenge,
+            'ahorro_reservado_mes'    => (float) $ahorroReservadoMes,
+            'ahorro_protegido_actual' => (float) $ahorroProtegidoActual,
+            'dinero_fugado_mes'       => (float) $dineroFugadoMes,
+            'analisis_usuario'        => $analisisUsuario,
+            'analisis'                => $analisis,
+            'distribucion_saldo'      => $distribucionSaldo,
         ]);
     }
 
@@ -332,19 +437,24 @@ class AuthController extends Controller
         $start = Carbon::create($year, $month, 1)->startOfMonth();
         $end   = Carbon::create($year, $month, 1)->endOfMonth();
 
-        $totalIncome = (float) $user->movements()
+        $totalIncome = (float) ($user->movements()
             ->where('type', 'income')
             ->whereBetween('created_at', [$start, $end])
-            ->sum('amount');
+            ->sum('amount') ?? 0.0);
 
-        $totalExpense = (float) $user->movements()
+        $totalExpense = (float) ($user->movements()
             ->where('type', 'expense')
             ->whereBetween('created_at', [$start, $end])
-            ->sum('amount');
+            ->sum('amount') ?? 0.0);
 
-        $totalGoalContributions = (float) $user->goalContributions()
-            ->whereBetween('created_at', [$start, $end])
-            ->sum('amount');
+        $totalGoalContributions = 0.0;
+        try {
+            $totalGoalContributions = (float) ($user->goalContributions()
+                ->whereBetween('created_at', [$start, $end])
+                ->sum('amount') ?? 0.0);
+        } catch (\Throwable) {
+            // Relación o tabla aún no migrada — devuelve 0 sin romper la respuesta
+        }
 
         $topTags = $user->movements()
             ->leftJoin('tags', 'movements.tag_id', '=', 'tags.id')
@@ -369,7 +479,72 @@ class AuthController extends Controller
         ]);
     }
 
+    /**
+     * Get authenticated user profile (name, phone, country_code, savings config).
+     */
+    public function getUserProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $hasSavingsCol   = Schema::hasColumn('users', 'has_active_challenge');
+        $savingsPctCol   = Schema::hasColumn('users', 'savings_mode_pct');
+
+        return $this->successResponse([
+            'id'                   => $user->id,
+            'name'                 => $user->name ?? '',
+            'phone'                => $user->phone ?? '',
+            'country_code'         => $user->country_code ?? '',
+            'has_active_challenge' => $hasSavingsCol ? (bool) $user->has_active_challenge : false,
+            'savings_mode_pct'     => $savingsPctCol ? (float) ($user->savings_mode_pct ?? 0.0) : 0.0,
+        ], 'Perfil del usuario');
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private function generarObservaciones(
+        float $incomes,
+        float $expenses,
+        float $balance,
+        float $ahorroMesPct,
+        float $eficienciaFiscal,
+        ?array $alertaGasto,
+        bool $hasActiveChallenge,
+        float $ahorroProtegido
+    ): array {
+        $obs = [];
+
+        if ($incomes > 0) {
+            if ($ahorroMesPct >= 30) {
+                $obs[] = '💪 Ahorrando el ' . $ahorroMesPct . '% de tus ingresos. ¡Disciplina excelente!';
+            } elseif ($ahorroMesPct >= 10) {
+                $obs[] = '💡 Ahorro actual: ' . $ahorroMesPct . '%. Llevar al 20% marca la diferencia.';
+            } elseif ($balance < 0) {
+                $obs[] = '⚠️ Tus gastos superan tus ingresos. Revisa tus egresos prioritarios.';
+            } else {
+                $obs[] = '📉 Ahorro bajo este mes. Pequeños recortes acumulan grandes resultados.';
+            }
+        }
+
+        if ($eficienciaFiscal >= 70) {
+            $obs[] = '🧾 El ' . $eficienciaFiscal . '% de tus gastos tienen factura. Buen control fiscal.';
+        } elseif ($eficienciaFiscal > 0 && $eficienciaFiscal < 40) {
+            $obs[] = '🧾 Solo el ' . $eficienciaFiscal . '% con factura. Pide comprobante siempre.';
+        }
+
+        if ($alertaGasto !== null) {
+            if ($alertaGasto['excede_anterior'] === true && $alertaGasto['variacion_pct'] !== null) {
+                $obs[] = '📈 "' . $alertaGasto['categoria'] . '" subió un ' . abs((float) $alertaGasto['variacion_pct']) . '% vs el mes anterior.';
+            } else {
+                $obs[] = '📊 Mayor gasto del mes en "' . $alertaGasto['categoria'] . '".';
+            }
+        }
+
+        if ($hasActiveChallenge && $ahorroProtegido > 0) {
+            $obs[] = '🔒 Ahorro reservado de $' . number_format($ahorroProtegido, 0, '.', ',') . ' está protegido.';
+        }
+
+        return array_slice($obs, 0, 3);
+    }
 
     private function calcularSaludFinanciera(float $incomes, float $expenses): array
     {

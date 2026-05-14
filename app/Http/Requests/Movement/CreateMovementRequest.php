@@ -32,6 +32,8 @@ class CreateMovementRequest extends FormRequest
             'has_invoice'         => 'nullable|boolean',
             'is_business_expense' => 'nullable|boolean',
             'rent_type'           => 'nullable|string|in:laboral,honorarios,capital,comercial,otros',
+            'is_digital'          => 'nullable|boolean',
+            'location_name'       => 'nullable|string|max:100',
         ];
     }
 
@@ -62,8 +64,9 @@ class CreateMovementRequest extends FormRequest
     {
         throw new HttpResponseException(
             response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors(),
+                'status'  => 'error',
+                'message' => 'Datos de movimiento inválidos',
+                'errors'  => $validator->errors(),
             ], 422)
         );
     }

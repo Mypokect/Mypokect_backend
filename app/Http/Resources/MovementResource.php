@@ -15,16 +15,15 @@ class MovementResource extends JsonResource
     public function toArray(Request $request): array
     {
         return [
-            'id' => $this->id,
-            'type' => $this->type,
-            'amount' => (float) $this->amount,
-            'description' => $this->description ?? '',
-            'tag_name' => $this->whenLoaded('tag', function () {
-                return $this->tag?->name ?? '';
-            }, ''),
-            'payment_method' => $this->payment_method ?? 'digital',
-            'has_invoice'         => (bool) $this->has_invoice,
-            'is_business_expense' => (bool) $this->is_business_expense,
+            'id'                  => $this->id,
+            'type'                => $this->type,
+            'amount'              => (float) ($this->amount ?? 0),
+            'description'         => $this->description ?? '',
+            'tag_name'            => $this->whenLoaded('tag', fn () => $this->tag?->name ?? '', ''),
+            'payment_method'      => $this->payment_method ?? 'digital',
+            'has_invoice'         => (bool) ($this->has_invoice ?? false),
+            'is_business_expense' => (bool) ($this->is_business_expense ?? false),
+            'rent_type'           => $this->rent_type ?? null,
             'created_at'          => $this->created_at->toIso8601String(),
         ];
     }

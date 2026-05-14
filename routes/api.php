@@ -49,8 +49,9 @@ Route::post('/password-recovery/reset-password', [AuthController::class, 'resetP
 Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
     // 1. HOME & USUARIO
-    Route::get('/home-data', [AuthController::class, 'homeData']);
-    Route::get('/financial-summary', [AuthController::class, 'financialSummary']);
+    Route::get('/home-data',          [AuthController::class, 'homeData']);
+    Route::get('/financial-summary',  [AuthController::class, 'financialSummary']);
+    Route::get('/user/profile',       [AuthController::class, 'getUserProfile']);
 
     // 2. MOVIMIENTOS
     Route::get('/movements', [MovementController::class, 'index']);

@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Finance;
 
 use App\Http\Controllers\Controller;
+use App\Http\Traits\ApiResponse;
 use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
@@ -12,6 +14,8 @@ use Illuminate\Support\Facades\Schema;
 
 class SavingsController extends Controller
 {
+    use ApiResponse;
+
     private const PLANES_CONFIG = [
         ['nombre' => 'Chill',   'emoji' => '🥳', 'porcentaje' => 0.10, 'color_hex' => '29B6F6',
          'mensaje_motivador' => 'Vas seguro, pero a paso lento. ¡No te detengas! 🐢'],
@@ -22,9 +26,10 @@ class SavingsController extends Controller
     ];
 
     /**
-     * Analyze savings capacity and return pre-calculated plans.
+     * Analyze savings capacity and return three pre-calculated plans.
+     * Also includes Alcancía con Fuga data (fuga acumulada del mes).
      */
-    public function analyze()
+    public function analyze(): JsonResponse
     {
         try {
             $user = Auth::user();
@@ -32,33 +37,32 @@ class SavingsController extends Controller
             $startOfMonth = Carbon::now()->startOfMonth();
             $endOfMonth   = Carbon::now()->endOfMonth();
 
-            $incomes  = (float) $user->movements()
+            $incomes  = (float) ($user->movements()
                 ->where('type', 'income')
                 ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
-                ->sum('amount');
+                ->sum('amount') ?? 0.0);
 
-            $expenses = (float) $user->movements()
+            $expenses = (float) ($user->movements()
                 ->where('type', 'expense')
                 ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
-                ->sum('amount');
+                ->sum('amount') ?? 0.0);
 
             $disponible = $incomes - $expenses;
 
-            // Build all 3 plans server-side
             $planes = array_map(function (array $cfg) use ($incomes, $disponible) {
                 $ahorro   = round($incomes * $cfg['porcentaje'], 2);
                 $diario   = round(($disponible - $ahorro) / 30, 2);
                 $esViable = $diario >= 0;
 
                 return [
-                    'nombre'            => $cfg['nombre'],
-                    'emoji'             => $cfg['emoji'],
-                    'porcentaje'        => $cfg['porcentaje'],
-                    'color_hex'         => $cfg['color_hex'],
-                    'ahorro_mensual'    => $ahorro,
-                    'presupuesto_diario'=> $diario,
-                    'es_viable'         => $esViable,
-                    'mensaje_motivador' => $esViable
+                    'nombre'             => $cfg['nombre'],
+                    'emoji'              => $cfg['emoji'],
+                    'porcentaje'         => $cfg['porcentaje'],
+                    'color_hex'          => $cfg['color_hex'],
+                    'ahorro_mensual'     => $ahorro,
+                    'presupuesto_diario' => $diario,
+                    'es_viable'          => $esViable,
+                    'mensaje_motivador'  => $esViable
                         ? $cfg['mensaje_motivador']
                         : '¡Meta Imposible! Baja el modo de ahorro.',
                     'proyecciones' => [
@@ -69,52 +73,56 @@ class SavingsController extends Controller
                 ];
             }, self::PLANES_CONFIG);
 
-            // AI insight — fire after math so UI can render fast on client cache hits
             $aiResponse = $this->consultarCoachIA($incomes, $expenses);
 
+            // ── Alcancía con Fuga ─────────────────────────────────────────────
             $hasActiveChallenge    = false;
             $savingsPct            = 0.0;
+            $ahorroReservadoMes    = 0.0;
             $ahorroProtegidoActual = 0.0;
             $dineroFugadoMes       = 0.0;
+            $disponibleParaVivir   = $disponible;
 
             if (Schema::hasColumn('users', 'has_active_challenge')) {
                 $hasActiveChallenge = (bool) $user->has_active_challenge;
                 $savingsPct         = (float) ($user->savings_mode_pct ?? 0.0);
 
                 if ($hasActiveChallenge && $savingsPct > 0) {
-                    $metaAhorro = round($incomes * $savingsPct, 2);
+                    $ahorroReservadoMes = round($incomes * $savingsPct, 2);
 
                     $ahorroProtegidoActual = Schema::hasColumn('users', 'challenge_savings_balance')
-                        ? (float) ($user->challenge_savings_balance ?? $metaAhorro)
-                        : $metaAhorro;
+                        ? (float) ($user->challenge_savings_balance ?? $ahorroReservadoMes)
+                        : $ahorroReservadoMes;
 
-                    $dineroFugadoMes = max(0.0, round($metaAhorro - $ahorroProtegidoActual, 2));
+                    $dineroFugadoMes     = max(0.0, round($ahorroReservadoMes - $ahorroProtegidoActual, 2));
+                    $disponibleParaVivir = round($disponible - $ahorroProtegidoActual, 2);
                 }
             }
 
-            return response()->json([
+            return $this->successResponse([
                 'ingresos'                => $incomes,
                 'gastos'                  => $expenses,
                 'planes'                  => $planes,
                 'ai_insight'              => $aiResponse,
                 'has_active_challenge'    => $hasActiveChallenge,
                 'savings_mode_pct'        => $savingsPct,
+                'ahorro_reservado_mes'    => $ahorroReservadoMes,
                 'ahorro_protegido_actual' => $ahorroProtegidoActual,
                 'dinero_fugado_mes'       => $dineroFugadoMes,
-            ], 200);
+                'disponible_para_vivir'   => $disponibleParaVivir,
+            ]);
 
         } catch (\Throwable $e) {
             Log::error('Savings analysis error: ' . $e->getMessage());
-            $message = config('app.debug') ? $e->getMessage() : 'Ocurrió un error interno en el servidor.';
-
-            return response()->json(['error' => 'Error', 'message' => $message], 500);
+            return $this->errorResponse($this->safeMessage($e));
         }
     }
 
     /**
      * Persist the user's chosen savings mode percentage.
+     * Resets challenge_savings_balance to the reserved amount for the current month.
      */
-    public function savePlan(Request $request)
+    public function savePlan(Request $request): JsonResponse
     {
         $request->validate([
             'pct' => ['required', 'numeric', 'between:0.01,0.50'],
@@ -123,10 +131,10 @@ class SavingsController extends Controller
         $pct  = round((float) $request->pct, 4);
         $user = Auth::user();
 
-        $incomesMes = (float) $user->movements()
+        $incomesMes = (float) ($user->movements()
             ->where('type', 'income')
             ->whereBetween('created_at', [now()->startOfMonth(), now()->endOfMonth()])
-            ->sum('amount');
+            ->sum('amount') ?? 0.0);
 
         $ahorroReservado = round($incomesMes * $pct, 2);
 
@@ -136,30 +144,28 @@ class SavingsController extends Controller
             $updateData['has_active_challenge'] = true;
         }
 
-        // Inicializa (o reinicia) el saldo protegido al activar/actualizar el reto
         if (Schema::hasColumn('users', 'challenge_savings_balance')) {
             $updateData['challenge_savings_balance'] = $ahorroReservado;
         }
 
         $user->update($updateData);
 
-        return response()->json([
+        return $this->successResponse([
             'saved'                   => true,
             'savings_mode_pct'        => $pct,
             'has_active_challenge'    => true,
             'ahorro_reservado_mes'    => $ahorroReservado,
             'ahorro_protegido_actual' => $ahorroReservado,
             'dinero_fugado_mes'       => 0.0,
-        ], 200);
+        ], 'Plan de ahorro activado.');
     }
 
     /**
-     * Cancel the active savings challenge.
+     * Cancel the active savings challenge and zero out all savings fields.
      */
-    public function cancelPlan()
+    public function cancelPlan(): JsonResponse
     {
-        $user = Auth::user();
-
+        $user       = Auth::user();
         $updateData = ['savings_mode_pct' => 0];
 
         if (Schema::hasColumn('users', 'has_active_challenge')) {
@@ -172,17 +178,18 @@ class SavingsController extends Controller
 
         $user->update($updateData);
 
-        return response()->json([
+        return $this->successResponse([
             'cancelled'               => true,
             'has_active_challenge'    => false,
             'savings_mode_pct'        => 0,
+            'ahorro_reservado_mes'    => 0.0,
             'ahorro_protegido_actual' => 0.0,
             'dinero_fugado_mes'       => 0.0,
-        ], 200);
+        ], 'Plan de ahorro cancelado.');
     }
 
     /**
-     * Short, direct prompt → faster Groq response.
+     * Call Groq for a brief, motivational financial insight.
      */
     private function consultarCoachIA(float $ingresos, float $gastos): array
     {
@@ -192,12 +199,12 @@ class SavingsController extends Controller
         $alerta = $pct > 90;
 
         $prompt = "Coach financiero. Ingresos: $ingresos, Gastos: $gastos ({$pct}%). "
-            . "Responde SOLO JSON válido: {\"titulo\":\"<máx 6 palabras>\",\"mensaje\":\"<2 oraciones cortas motivadoras en español>\","
-            . "\"alerta\":" . ($alerta ? 'true' : 'false') . ",\"color\":\"$color\"}";
+            . 'Responde SOLO JSON válido: {"titulo":"<máx 6 palabras>","mensaje":"<2 oraciones cortas motivadoras en español>",'
+            . '"alerta":' . ($alerta ? 'true' : 'false') . ',"color":"' . $color . '"}';
 
         foreach (['llama-3.1-8b-instant', 'gemma2-9b-it'] as $modelo) {
             try {
-                $response = Http::withHeaders([
+                $response = Http::timeout(3)->withHeaders([
                     'Authorization' => "Bearer $apiKey",
                     'Content-Type'  => 'application/json',
                 ])->post('https://api.groq.com/openai/v1/chat/completions', [
@@ -209,7 +216,10 @@ class SavingsController extends Controller
                 ]);
 
                 if ($response->successful()) {
-                    return json_decode($response['choices'][0]['message']['content'], true);
+                    $decoded = json_decode($response['choices'][0]['message']['content'], true);
+                    if (is_array($decoded)) {
+                        return $decoded;
+                    }
                 }
             } catch (\Exception) {
             }

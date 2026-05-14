@@ -3,11 +3,15 @@
 namespace App\Http\Controllers\Shared;
 
 use App\Http\Controllers\Controller;
+use App\Http\Traits\ApiResponse;
+use Illuminate\Http\JsonResponse;
 
 class TransactionController extends Controller
 {
-    public function confirmPayment($id)
+    use ApiResponse;
+
+    public function confirmPayment(int $id): JsonResponse
     {
-        return response()->json(['message' => 'Método pendiente de implementar'], 200);
+        return $this->errorResponse('Método pendiente de implementar.', 501);
     }
 }

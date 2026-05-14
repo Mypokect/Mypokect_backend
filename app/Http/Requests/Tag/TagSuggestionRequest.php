@@ -53,8 +53,9 @@ class TagSuggestionRequest extends FormRequest
     {
         throw new HttpResponseException(
             response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors(),
+                'status'  => 'error',
+                'message' => 'Datos de sugerencia inválidos',
+                'errors'  => $validator->errors(),
             ], 422)
         );
     }

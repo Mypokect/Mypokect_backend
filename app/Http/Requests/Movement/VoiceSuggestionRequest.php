@@ -49,8 +49,9 @@ class VoiceSuggestionRequest extends FormRequest
     {
         throw new HttpResponseException(
             response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors(),
+                'status'  => 'error',
+                'message' => 'Transcripción inválida',
+                'errors'  => $validator->errors(),
             ], 422)
         );
     }
