@@ -101,150 +101,86 @@ class MovementAIService
      */
     public function suggestTag(string $description, float $amount, User $user): string
     {
-        Log::info('=== SUGGEST TAG STARTED ===');
-        Log::info('Input', ['description' => $description, 'amount' => $amount, 'user_id' => $user->id]);
-
         try {
-            // Get existing tags ordered by popularity (most used first)
-            Log::debug('Fetching user tags ordered by popularity');
+            // Fast-path: deterministic mapping before calling LLM (zero token cost)
+            $engineCategory = FinancialMappingEngine::mapToCategory($description);
+
             $existingTags = Tag::where('user_id', $user->id)
                 ->withCount('movements')
                 ->orderBy('movements_count', 'desc')
                 ->pluck('name')
                 ->toArray();
-            Log::info('Tags fetched and ordered', ['count' => count($existingTags), 'tags' => $existingTags]);
 
-            // Detect user's language
-            Log::debug('Detecting user language');
+            if ($engineCategory !== null) {
+                // Prefer a matching user tag over the canonical category name
+                foreach ($existingTags as $tag) {
+                    if (mb_stripos($tag, $engineCategory) !== false || mb_stripos($engineCategory, $tag) !== false) {
+                        Log::info('suggestTag: engine fast-path matched user tag', ['tag' => $tag]);
+                        return $tag;
+                    }
+                }
+                Log::info('suggestTag: engine fast-path returned canonical category', ['category' => $engineCategory]);
+                return $engineCategory;
+            }
+
+            // LLM path — only reached when engine has no match
             $language = $this->detectLanguage($description, $existingTags);
-            Log::info('Language detected', ['language' => $language]);
-
-            // Build optimized prompt
-            Log::debug('Building tag prompt');
-            $prompt = $this->buildTagPrompt($description, $amount, $existingTags, $language);
-
-            // Call Groq API
-            Log::debug('Calling Groq API for tag suggestion');
+            $prompt   = $this->buildTagPrompt($description, $amount, $existingTags, $language);
             $response = $this->callGroqAPI($prompt, 0.1, 15);
 
             if (! $response) {
-                Log::warning('Empty response from Groq API, using fallback');
-                $fallback = $language === 'es' ? 'Otros' : 'Other';
-                Log::info('Using fallback tag', ['tag' => $fallback]);
-
-                return $fallback;
+                return FinancialMappingEngine::enrichTag($description, 'General');
             }
 
-            Log::debug('Raw response received', ['response' => $response]);
-
-            // Clean the response to extract ONLY the tag name
             $clean = trim($response);
-            Log::debug('After trim', ['clean' => $clean]);
 
-            // Strategy 1: Try to find the tag in existing tags (most reliable)
-            Log::debug('=== STRATEGY 1: Search in existing tags ===');
+            // Strategy 1: Exact match in user's existing tags
             foreach ($existingTags as $tag) {
                 if (stripos($clean, $tag) !== false) {
-                    Log::info('STRATEGY 1 SUCCESS: Found in existing tags', ['tag' => $tag]);
-                    Log::info('=== SUGGEST TAG COMPLETED ===', ['result' => $tag, 'strategy' => 1]);
-
                     return $tag;
                 }
             }
-            Log::debug('STRATEGY 1 FAILED: Tag not found in existing tags');
 
-            // Strategy 2: Remove common prefixes/suffixes that Groq adds
-            Log::debug('=== STRATEGY 2: Remove prefixes ===');
+            // Strategy 2: Strip LLM preamble (Tag:, Category:, etc.)
             $prefixes = [
-                'Based on the rules',
-                'Based on the transaction',
-                'I will categorize',
-                'categorize as',
-                'i will categorize',
-                'As per the rules',
-                'Following the rules',
-                'The tag is',
-                'The category is',
-                'The answer is',
-                'Answer:',
-                'Output:',
-                'Response:',
-                'Tag:',
-                'Category:',
-                'Categoria:',
-                'Etiqueta:',
-                'As per',
-                'the transaction',
-                'following the rules',
+                'Based on the rules', 'Based on the transaction', 'I will categorize',
+                'categorize as', 'As per the rules', 'Following the rules', 'The tag is',
+                'The category is', 'Answer:', 'Output:', 'Response:', 'Tag:',
+                'Category:', 'Categoria:', 'Etiqueta:',
             ];
-
-            $prefixFound = null;
             foreach ($prefixes as $prefix) {
                 if (stripos($clean, $prefix) === 0) {
-                    Log::debug('Found prefix', ['prefix' => $prefix]);
-                    $prefixFound = $prefix;
                     $clean = substr($clean, strlen($prefix));
                     break;
                 }
             }
-            if ($prefixFound) {
-                Log::debug('After removing prefix', ['clean' => $clean]);
-            }
-
-            // Remove colons and extra content after colon
             if (strpos($clean, ':') !== false) {
-                Log::debug('Found colon, extracting after colon');
                 $parts = explode(':', $clean);
                 $clean = end($parts);
-                Log::debug('After colon extraction', ['clean' => $clean]);
             }
-
-            // Remove special characters at start/end but keep internal characters
             $clean = trim($clean, ' "\'.,:-_*()[]{}');
-            Log::debug('After trim special chars', ['clean' => $clean]);
-
-            // Replace multiple spaces with single space
             $clean = trim(preg_replace('/\s+/', ' ', $clean));
-            Log::debug('After space normalization', ['clean' => $clean]);
 
-            // Get the last word (usually the tag after removing explanation)
-            Log::debug('=== STRATEGY 3: Extract meaningful word ===');
-            $words = explode(' ', $clean);
-            Log::debug('Words split', ['words' => $words, 'count' => count($words)]);
+            // Strategy 3: Extract last meaningful word
+            $fillerWords = ['the','a','an','is','as','for','el','la','los','las','un','una','unos','unas','es','y','o','or','and'];
+            $words   = explode(' ', $clean);
             $lastWord = trim(end($words) ?? '');
-            Log::debug('Last word extracted', ['word' => $lastWord]);
-
-            // Remove any remaining special characters
             $lastWord = preg_replace('/[^a-zñáéíóúA-ZÑÁÉÍÓÚ0-9]/i', '', $lastWord);
-            Log::debug('After char filtering', ['word' => $lastWord]);
-
-            // Remove common filler words (en/es)
-            $fillerWords = ['the', 'a', 'an', 'is', 'as', 'for', 'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'es', 'y', 'o', 'or', 'and'];
-            if (in_array(strtolower($lastWord), $fillerWords)) {
-                Log::debug('Last word is filler, searching for meaningful word');
-                // Try to find a meaningful word
+            if (in_array(mb_strtolower($lastWord), $fillerWords)) {
                 for ($i = count($words) - 2; $i >= 0; $i--) {
                     $word = trim(preg_replace('/[^a-zñáéíóúA-ZÑÁÉÍÓÚ0-9]/i', '', $words[$i]));
-                    if (! empty($word) && ! in_array(strtolower($word), $fillerWords) && strlen($word) > 2) {
-                        Log::debug('Found meaningful word', ['word' => $word, 'index' => $i]);
+                    if (! empty($word) && ! in_array(mb_strtolower($word), $fillerWords) && strlen($word) > 2) {
                         $lastWord = $word;
                         break;
                     }
                 }
             }
 
-            $finalTag = ucfirst(strtolower(trim($lastWord))) ?: ($language === 'es' ? 'Otros' : 'Other');
-            Log::info('STRATEGY 2/3 SUCCESS: Tag extracted', ['tag' => $finalTag]);
-            Log::info('=== SUGGEST TAG COMPLETED ===', ['result' => $finalTag, 'strategy' => '2-3']);
-
-            return $finalTag;
+            $finalTag = ucfirst(mb_strtolower(trim($lastWord)));
+            return $finalTag ?: FinancialMappingEngine::enrichTag($description, 'General');
 
         } catch (\Exception $e) {
-            Log::error('ERROR in suggestTag', [
-                'error' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
-            ]);
+            Log::error('suggestTag error', ['error' => $e->getMessage()]);
             throw $e;
         }
     }
@@ -300,81 +236,22 @@ class MovementAIService
     protected function buildVoiceMovementPrompt(string $transcription, string $tagsList, string $goalsList): string
     {
         $prompt = <<<PROMPT
-You are a financial transaction extractor for informal Colombian Spanish.
-Respond ONLY with a single valid JSON object. No markdown, no explanation, no extra text.
+Parse Colombian Spanish financial voice input. JSON only — no markdown, no text.
+IN: "$transcription"
+TAGS: $tagsList
+GOALS: $goalsList
 
-INPUT: "$transcription"
+type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé (default expense)
+amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000. amount=0+error_type=insufficient_data if missing.
+description: ≤5 words, match input language.
+suggested_tag: pick from TAGS, or use: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/Mercado→Mercado, Rappi/restaurante/almuerzo/café→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas. If goal use "Meta: <goal>". NEVER "Otros".
+payment_method: nequi/daviplata/tarjeta/transferencia=digital | efectivo/cash=cash (default digital)
+has_invoice: factura/IVA/fe/fce=true (default false)
+is_business_expense: empresa/negocio/cliente/deducible=true (default false)
+rent_type (income only, else null): sueldo/quincena=laboral, honorarios/freelance=honorarios, arriendo/intereses=capital, venta/negocio=comercial, else=otros
 
-USER TAGS (reuse one if it fits): $tagsList
-USER GOALS (if money goes toward a goal, prefix tag with "Meta:"): $goalsList
-
---- EXTRACTION RULES ---
-
-1. TYPE
-   "income"  = money received (llegó, pagaron, cobré, quincena, sueldo, abono, ingresó)
-   "expense" = money spent (gasté, pagué, compré, transferí, mandé, salió)
-   Default: "expense"
-
-2. AMOUNT — convert slang to number:
-   luca / lucas = 1000
-   k / K        = 1000   (e.g. "30k" = 30000)
-   palo / palos = 1000000
-   millón / millones = 1000000
-   medio palo   = 500000
-   If no amount found: set amount=0 and error_type="insufficient_data"
-
-3. DESCRIPTION
-   Short phrase (max 5 words) describing what happened. Same language as input.
-   Examples: "Almuerzo en restaurante", "Gasolina carro", "Quincena trabajo"
-
-4. SUGGESTED_TAG
-   Pick the single most relevant tag from USER TAGS above, or create a 1–2 word category.
-   If it's a goal contribution, use "Meta: <goal name>".
-   Merchant→category rules (NEVER use "Otros"/"Other"):
-   Uber/Didi/taxi/TransMilenio/bus/gasolina → Transporte
-   D1/Éxito/Jumbo/Carulla/Ara/supermercado → Mercado
-   Rappi/restaurante/almuerzo/café/McDonald's → Comida
-   Netflix/Spotify/Disney/cine/videojuego → Entretenimiento
-   arriendo/administración/predial → Vivienda
-   luz/agua/internet/Claro/Movistar/EPM/gas → Servicios
-   farmacia/médico/EPS/hospital/droguería → Salud
-   universidad/colegio/curso/Platzi → Educación
-   ropa/zapatos/Zara/Nike/Adidas → Ropa
-   gimnasio/gym/deporte/SmartFit → Deporte
-   banco/crédito/préstamo/Nequi/ahorro → Finanzas
-
-5. PAYMENT_METHOD
-   "digital" = nequi, daviplata, transfiya, transferencia, tarjeta, app, bancolombia, bbva
-   "cash"    = efectivo, billetes, plata física, en mano
-   Default: "digital"
-
-6. HAS_INVOICE
-   true  = factura, fe, fce, recibo, boleta, IVA, electrónica
-   false = everything else
-   Default: false
-
-7. IS_BUSINESS_EXPENSE
-   true  = gasto de trabajo, empresa, negocio, deducible, cliente
-   false = everything else
-   Default: false
-
-8. RENT_TYPE (only for income, else null)
-   "laboral"    = sueldo, salario, quincena, nómina, contrato laboral
-   "honorarios" = honorarios, freelance, consultoría, servicios profesionales
-   "capital"    = arriendo, intereses, dividendos, inversión, rendimientos
-   "comercial"  = venta, negocio, tienda, mercancía, comercio
-   "otros"      = any other income that doesn't fit above
-   If type="expense": always null
-
-9. ERROR_TYPE
-   Set "insufficient_data" if: amount=0 OR the input is unclear/incomplete.
-   Otherwise: null
-
---- OUTPUT FORMAT (fill every field) ---
 {"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"","error_type":null}
 PROMPT;
-
-        Log::debug('Voice prompt built', ['prompt_length' => strlen($prompt)]);
 
         return $prompt;
     }

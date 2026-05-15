@@ -241,11 +241,13 @@ class AuthController extends Controller
     public function homeData(Request $request): JsonResponse
     {
         $user  = $request->user();
-        $month = (int) $request->query('month', now()->month);
-        $year  = (int) $request->query('year',  now()->year);
+        $month = (int) $request->query('month', now('America/Bogota')->month);
+        $year  = (int) $request->query('year',  now('America/Bogota')->year);
 
-        $start = Carbon::create($year, $month, 1)->startOfMonth();
-        $end   = Carbon::create($year, $month, 1)->endOfMonth();
+        // Build date range in Colombia timezone, then convert to UTC for DB queries
+        $tz    = 'America/Bogota';
+        $start = Carbon::createFromDate($year, $month, 1, $tz)->startOfMonth()->utc();
+        $end   = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
 
         $incomes  = (float) ($user->movements()->where('type', 'income') ->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
         $expenses = (float) ($user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
@@ -431,11 +433,12 @@ class AuthController extends Controller
     public function financialSummary(Request $request): JsonResponse
     {
         $user  = $request->user();
-        $month = (int) $request->query('month', now()->month);
-        $year  = (int) $request->query('year',  now()->year);
+        $tz    = 'America/Bogota';
+        $month = (int) $request->query('month', now($tz)->month);
+        $year  = (int) $request->query('year',  now($tz)->year);
 
-        $start = Carbon::create($year, $month, 1)->startOfMonth();
-        $end   = Carbon::create($year, $month, 1)->endOfMonth();
+        $start = Carbon::createFromDate($year, $month, 1, $tz)->startOfMonth()->utc();
+        $end   = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
 
         $totalIncome = (float) ($user->movements()
             ->where('type', 'income')
