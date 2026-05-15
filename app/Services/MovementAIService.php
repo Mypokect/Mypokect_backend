@@ -330,7 +330,18 @@ USER GOALS (if money goes toward a goal, prefix tag with "Meta:"): $goalsList
 4. SUGGESTED_TAG
    Pick the single most relevant tag from USER TAGS above, or create a 1–2 word category.
    If it's a goal contribution, use "Meta: <goal name>".
-   Examples: "Comida", "Transporte", "Meta: Carro nuevo"
+   Merchant→category rules (NEVER use "Otros"/"Other"):
+   Uber/Didi/taxi/TransMilenio/bus/gasolina → Transporte
+   D1/Éxito/Jumbo/Carulla/Ara/supermercado → Mercado
+   Rappi/restaurante/almuerzo/café/McDonald's → Comida
+   Netflix/Spotify/Disney/cine/videojuego → Entretenimiento
+   arriendo/administración/predial → Vivienda
+   luz/agua/internet/Claro/Movistar/EPM/gas → Servicios
+   farmacia/médico/EPS/hospital/droguería → Salud
+   universidad/colegio/curso/Platzi → Educación
+   ropa/zapatos/Zara/Nike/Adidas → Ropa
+   gimnasio/gym/deporte/SmartFit → Deporte
+   banco/crédito/préstamo/Nequi/ahorro → Finanzas
 
 5. PAYMENT_METHOD
    "digital" = nequi, daviplata, transfiya, transferencia, tarjeta, app, bancolombia, bbva
@@ -686,6 +697,20 @@ CONDICIONES:
 - TODAS las categorías deben aparecer en el JSON de salida (usa [] si ningún movimiento le corresponde).
 - Usa los nombres EXACTOS de las categorías (sensible a mayúsculas/minúsculas).
 - Responde SOLO con el JSON. Sin explicaciones, sin Markdown, sin texto adicional.
+- NUNCA uses "Otros" ni "Other" — siempre asigna a la categoría más cercana disponible.
+
+MERCHANT→CATEGORY RULES (úsalas para desambiguar):
+Uber/Didi/taxi/TransMilenio/bus/gasolina → Transporte
+D1/Éxito/Jumbo/Carulla/Ara/supermercado → Mercado
+Rappi/restaurante/almuerzo/café/McDonald's → Comida
+Netflix/Spotify/Disney/cine/videojuego → Entretenimiento
+arriendo/administración/predial → Vivienda
+luz/agua/internet/Claro/Movistar/EPM/gas → Servicios
+farmacia/médico/EPS/hospital/droguería → Salud
+universidad/colegio/curso → Educación
+ropa/zapatos/Zara/Nike → Ropa
+gimnasio/gym/deporte → Deporte
+banco/crédito/préstamo/Nequi → Finanzas
 
 EJEMPLOS AMBIGUOS (mismo tag, categorías distintas):
 - [0] Tag:"Servicio" Desc:"hotel marriott"     → categoría "Hospedaje"
@@ -994,67 +1019,66 @@ PROMPT;
     {
         Log::info('=== SIMPLE FALLBACK MATCHING STARTED ===', [
             'categories_count' => count($categories),
-            'movements_count' => count($movements),
+            'movements_count'  => count($movements),
         ]);
 
+        // Initialize result structure
         $result = [];
         foreach ($categories as $cat) {
-            $result[$cat] = [
-                'tags' => [],
-                'keywords' => []
-            ];
+            $result[$cat] = ['tags' => [], 'keywords' => []];
         }
 
-        // Agrupar movimientos por tag
+        // Group movements by tag
         $movementsByTag = [];
         foreach ($movements as $m) {
             $tag = $m['tag'] ?? 'Sin etiqueta';
-            if (!isset($movementsByTag[$tag])) {
-                $movementsByTag[$tag] = [];
-            }
             $movementsByTag[$tag][] = $m;
         }
 
         Log::info('Tags únicos encontrados', ['tags' => array_keys($movementsByTag)]);
 
-        // Para cada categoría, buscar tags que coincidan semánticamente
+        $stopwords = ['de','del','la','el','en','con','por','para','y','a','un','una','los','las'];
+
         foreach ($categories as $categoryName) {
             $categoryLower = mb_strtolower($categoryName);
-            $categoryWords = preg_split('/[\s\-_]+/', $categoryLower, -1, PREG_SPLIT_NO_EMPTY);
+            $categoryWords = array_filter(
+                preg_split('/[\s\-_]+/', $categoryLower, -1, PREG_SPLIT_NO_EMPTY),
+                fn($w) => strlen($w) >= 3
+            );
 
             $matchedTags = [];
-            $keywords = [];
+            $keywords    = [];
 
             foreach ($movementsByTag as $tagName => $tagMovements) {
-                $tagLower = mb_strtolower($tagName);
+                $tagLower   = mb_strtolower($tagName);
                 $shouldMatch = false;
 
-                // Estrategia 1: Coincidencia exacta de palabras
-                foreach ($categoryWords as $word) {
-                    if (strlen($word) < 3) continue;
-                    if (mb_strpos($tagLower, $word) !== false || mb_strpos($categoryLower, $tagLower) !== false) {
-                        $shouldMatch = true;
-                        break;
+                // Strategy 1: FinancialMappingEngine — map tag and descriptions to a canonical category
+                $engineCategory = FinancialMappingEngine::mapToCategory($tagLower);
+                if ($engineCategory !== null && mb_strtolower($engineCategory) === $categoryLower) {
+                    $shouldMatch = true;
+                }
+
+                // Strategy 2: Also check individual movement descriptions through engine
+                if (!$shouldMatch) {
+                    foreach ($tagMovements as $mov) {
+                        $desc = trim($mov['description'] ?? '');
+                        if (!empty($desc) && $desc !== 'sin descripción') {
+                            $ec = FinancialMappingEngine::mapToCategory(mb_strtolower($desc));
+                            if ($ec !== null && mb_strtolower($ec) === $categoryLower) {
+                                $shouldMatch = true;
+                                break;
+                            }
+                        }
                     }
                 }
 
-                // Estrategia 2: Matching semántico manual
+                // Strategy 3: Direct substring match between tag words and category words
                 if (!$shouldMatch) {
-                    $semanticRules = [
-                        'servicio' => ['servicio', 'hotel', 'hospedaje', 'alojamiento', 'arriendo'],
-                        'comida' => ['comida', 'alimento', 'restaurante', 'bebida'],
-                        'transporte' => ['transporte', 'movilidad', 'taxi', 'uber', 'viaje'],
-                        'compras' => ['compras', 'compra', 'shopping'],
-                    ];
-
-                    foreach ($semanticRules as $keyword => $synonyms) {
-                        if (mb_strpos($tagLower, $keyword) !== false) {
-                            foreach ($synonyms as $syn) {
-                                if (mb_strpos($categoryLower, $syn) !== false) {
-                                    $shouldMatch = true;
-                                    break 2;
-                                }
-                            }
+                    foreach ($categoryWords as $word) {
+                        if (mb_strpos($tagLower, $word) !== false || mb_strpos($categoryLower, $tagLower) !== false) {
+                            $shouldMatch = true;
+                            break;
                         }
                     }
                 }
@@ -1062,12 +1086,10 @@ PROMPT;
                 if ($shouldMatch && !in_array($tagName, $matchedTags)) {
                     $matchedTags[] = $tagName;
 
-                    // Extraer keywords de descripciones
                     foreach ($tagMovements as $mov) {
                         $desc = trim($mov['description'] ?? '');
                         if (!empty($desc) && $desc !== 'sin descripción') {
                             $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($desc), -1, PREG_SPLIT_NO_EMPTY);
-                            $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
                             foreach ($words as $word) {
                                 if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word) && !in_array($word, $keywords)) {
                                     $keywords[] = $word;
@@ -1079,12 +1101,12 @@ PROMPT;
             }
 
             $result[$categoryName] = [
-                'tags' => array_values($matchedTags),
-                'keywords' => array_values($keywords)
+                'tags'     => array_values($matchedTags),
+                'keywords' => array_values($keywords),
             ];
 
             Log::info("Fallback matching para '{$categoryName}'", [
-                'matched_tags' => $matchedTags,
+                'matched_tags'   => $matchedTags,
                 'keywords_count' => count($keywords),
             ]);
         }

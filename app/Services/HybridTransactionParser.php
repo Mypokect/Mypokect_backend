@@ -318,16 +318,28 @@ class HybridTransactionParser
             if (preg_match($pattern, $input, $m)) {
                 $word = mb_strtolower(trim($m[1]));
                 if (!in_array($word, $rejectArticles, true)) {
-                    $candidate = ucfirst($word);
                     // Prefer matching an existing user tag (case-insensitive)
                     foreach ($userTags as $tag) {
                         if (mb_stripos($tag, $word) !== false || mb_stripos($word, mb_strtolower($tag)) !== false) {
                             return $tag;
                         }
                     }
-                    return $candidate;
+                    // Map to canonical category before returning raw word
+                    return FinancialMappingEngine::enrichTag($word, ucfirst($word));
                 }
             }
+        }
+
+        // Last resort: scan the full input through the mapping engine
+        $engineCategory = FinancialMappingEngine::mapToCategory($input);
+        if ($engineCategory !== null) {
+            // Prefer user tag that matches the canonical category
+            foreach ($userTags as $tag) {
+                if (mb_stripos($tag, $engineCategory) !== false) {
+                    return $tag;
+                }
+            }
+            return $engineCategory;
         }
 
         return 'General';

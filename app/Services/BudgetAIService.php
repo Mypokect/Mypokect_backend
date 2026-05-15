@@ -79,6 +79,8 @@ class BudgetAIService
             ? ''
             : ', "suggested_tags": ["tag1"]';
 
+        $mappingHint = FinancialMappingEngine::getPromptHint();
+
         $prompt = <<<PROMPT
         You are a financial planning AI specialized in realistic personal budgeting for Latin American users.
 
@@ -89,6 +91,9 @@ class BudgetAIService
         - title: "$title"
         - description: "$description"
         - total_amount: $amount
+
+        CATEGORY NAMING RULES (follow exactly):
+        $mappingHint
 
         RULES:
         - Return ONLY valid raw JSON.
@@ -102,7 +107,7 @@ class BudgetAIService
         - Category amounts MUST sum EXACTLY to $amount.
         - Use realistic spending proportions based on the actual type of event or plan.
         - NEVER split amounts evenly unless it is genuinely realistic.
-        - Avoid generic categories like "Other" unless absolutely necessary.
+        - NEVER use "Otros" or "Other" as a category — always map to a specific named category.
         - Each category must have:
         - name
         - amount
