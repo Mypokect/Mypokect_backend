@@ -141,6 +141,7 @@ class MovementController extends Controller
 
             // ── Alcancía con Fuga (Ahorro Reactivo) ───────────────────────────
             $leakInfo = $this->applyLeakyBucket($user, $movement);
+            $this->recalculateSavingsChallenge($user);
 
             return $this->createdResponse([
                 'movement'      => new MovementResource($movement),
@@ -154,6 +155,58 @@ class MovementController extends Controller
 
             return $this->errorResponse('Error al crear movimiento: ' . $this->safeMessage($e));
         }
+    }
+
+    /**
+     * Full monthly recalculation of the savings challenge balance.
+     * Sums the daily excess over the spending ceiling for every day of the current month,
+     * then writes the resulting protected balance back to the user record.
+     * Called after every movement mutation (create, update, delete).
+     */
+    private function recalculateSavingsChallenge($user): void
+    {
+        if (! Schema::hasColumn('users', 'challenge_savings_balance')) return;
+        if (! Schema::hasColumn('users', 'has_active_challenge')) return;
+
+        $user->refresh();
+
+        if (! $user->has_active_challenge || $user->savings_mode_pct <= 0) return;
+
+        $tz           = 'America/Bogota';
+        $now          = Carbon::now($tz);
+        $startOfMonth = $now->copy()->startOfMonth()->utc()->toDateTimeString();
+        $endOfMonth   = $now->copy()->endOfMonth()->utc()->toDateTimeString();
+
+        $incomesMes = (float) $user->movements()
+            ->where('type', 'income')
+            ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+            ->sum('amount');
+
+        if ($incomesMes <= 0) return;
+
+        $metaAhorro  = $incomesMes * (float) $user->savings_mode_pct;
+        $techoDiario = ($incomesMes - $metaAhorro) / 30;
+
+        // Single query: group expenses by local date to respect Colombia midnight
+        $rows = \Illuminate\Support\Facades\DB::select(
+            "SELECT DATE(CONVERT_TZ(created_at, '+00:00', '-05:00')) AS dia,
+                    SUM(amount) AS total_dia
+             FROM movements
+             WHERE user_id = :uid AND type = 'expense'
+               AND created_at BETWEEN :start AND :end
+             GROUP BY dia",
+            ['uid' => $user->id, 'start' => $startOfMonth, 'end' => $endOfMonth]
+        );
+
+        $totalFuga = 0.0;
+        foreach ($rows as $row) {
+            $totalFuga += max(0.0, (float) $row->total_dia - $techoDiario);
+        }
+
+        $nuevoSaldo = max(0.0, round($metaAhorro - $totalFuga, 2));
+        $user->update(['challenge_savings_balance' => $nuevoSaldo]);
+
+        Log::info("Savings recalculated for user {$user->id}: balance={$nuevoSaldo}, fuga_total={$totalFuga}");
     }
 
     /**
@@ -360,6 +413,7 @@ class MovementController extends Controller
             DB::commit();
 
             $budgetImpact = $this->computeBudgetImpact($user, $movement);
+            $this->recalculateSavingsChallenge($user);
 
             Log::info("Movement {$movement->id} updated by user {$user->id}");
 
@@ -387,6 +441,8 @@ class MovementController extends Controller
             $movement = Movement::where('user_id', $user->id)->findOrFail($id);
 
             $movement->delete();
+
+            $this->recalculateSavingsChallenge($user);
 
             Log::info("Movement {$id} deleted by user {$user->id}");
 

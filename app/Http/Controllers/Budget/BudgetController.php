@@ -59,16 +59,18 @@ class BudgetController extends Controller
                 ->orderBy('created_at', 'desc')
                 ->get();
 
-            // ── Calcular gasto actual (spent) para cada presupuesto ─────────────
-            $budgetsWithSpent = $budgets->map(function ($budget) use ($user) {
+            // ── Calcular gasto actual para cada presupuesto ─────────────────────
+            $tz = 'America/Bogota';
+            $budgetsWithSpent = $budgets->map(function ($budget) use ($user, $tz) {
                 $totalSpent = 0;
 
-                // Solo calcular si tiene fechas válidas
                 if ($budget->date_from && $budget->date_to) {
-                    $from = $budget->date_from->format('Y-m-d').' 00:00:00';
-                    $to = $budget->date_to->format('Y-m-d').' 23:59:59';
+                    // Apply Colombia timezone so movements at night aren't misclassified
+                    $from = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)
+                        ->startOfDay()->utc()->toDateTimeString();
+                    $to   = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_to->format('Y-m-d'), $tz)
+                        ->endOfDay()->utc()->toDateTimeString();
 
-                    // Obtener todos los tags vinculados de todas las categorías
                     $linkedTags = [];
                     foreach ($budget->categories as $category) {
                         foreach ($this->extractTagNames($category->linked_tags) as $tag) {
@@ -78,7 +80,6 @@ class BudgetController extends Controller
                         }
                     }
 
-                    // Calcular gasto total usando los tags únicos
                     if (! empty($linkedTags)) {
                         $totalSpent = Movement::where('user_id', $user->id)
                             ->where('type', 'expense')
@@ -90,9 +91,16 @@ class BudgetController extends Controller
                     }
                 }
 
-                // Agregar campo spent al objeto budget
-                $budgetArray = $budget->toArray();
-                $budgetArray['spent'] = round((float) $totalSpent, 2);
+                $budgetArray  = $budget->toArray();
+                $totalAmount  = (float) ($budget->total_amount ?? 0);
+                $montoGastado = round((float) $totalSpent, 2);
+                $porcConsumido = $totalAmount > 0
+                    ? min(1.0, round($montoGastado / $totalAmount, 4))
+                    : 0.0;
+
+                $budgetArray['spent']               = $montoGastado; // backward compat
+                $budgetArray['monto_gastado']        = $montoGastado;
+                $budgetArray['porcentaje_consumido'] = $porcConsumido;
 
                 return $budgetArray;
             });

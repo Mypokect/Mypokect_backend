@@ -99,6 +99,10 @@ class SavingsController extends Controller
                 }
             }
 
+            $porcentajeLogro = $ahorroReservadoMes > 0
+                ? min(1.0, round($ahorroProtegidoActual / $ahorroReservadoMes, 4))
+                : 0.0;
+
             return $this->successResponse([
                 'ingresos'                => $incomes,
                 'gastos'                  => $expenses,
@@ -110,6 +114,7 @@ class SavingsController extends Controller
                 'ahorro_protegido_actual' => $ahorroProtegidoActual,
                 'dinero_fugado_mes'       => $dineroFugadoMes,
                 'disponible_para_vivir'   => $disponibleParaVivir,
+                'porcentaje_logro'        => $porcentajeLogro,
             ]);
 
         } catch (\Throwable $e) {
