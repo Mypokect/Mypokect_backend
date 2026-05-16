@@ -56,6 +56,8 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // 2. MOVIMIENTOS
     Route::get('/movements', [MovementController::class, 'index']);
     Route::post('/movements', [MovementController::class, 'store']);
+    Route::put('/movements/{movement}', [MovementController::class, 'update']);
+    Route::delete('/movements/{movement}', [MovementController::class, 'destroy']);
 
     // IA de Voz para Movimientos (Entiende gasto/ingreso + monto + metodo de pago)
     Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])

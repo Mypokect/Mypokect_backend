@@ -12,6 +12,7 @@ use App\Models\Movement;
 use App\Models\Tag;
 use App\Services\MovementAIService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -307,6 +308,96 @@ class MovementController extends Controller
         }
 
         return [];
+    }
+
+    /**
+     * Update a movement.
+     */
+    public function update(Request $request, $id): JsonResponse
+    {
+        $request->validate([
+            'type'                => 'sometimes|required|in:income,expense',
+            'amount'              => 'sometimes|required|numeric|min:0.01',
+            'description'         => 'sometimes|nullable|string|max:255',
+            'payment_method'      => 'sometimes|nullable|in:cash,digital',
+            'tag_name'            => 'sometimes|nullable|string|max:100',
+            'has_invoice'         => 'sometimes|nullable|boolean',
+            'is_business_expense' => 'sometimes|nullable|boolean',
+            'rent_type'           => 'sometimes|nullable|in:laboral,honorarios,capital,comercial,otros',
+        ]);
+
+        try {
+            $user     = Auth::user();
+            $movement = Movement::where('user_id', $user->id)->findOrFail($id);
+
+            DB::beginTransaction();
+
+            $tagId = $movement->tag_id;
+            if ($request->has('tag_name')) {
+                if (empty($request->tag_name)) {
+                    $tagId = null;
+                } else {
+                    $tagName = ucfirst(strtolower(trim($request->tag_name)));
+                    $tag     = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+                    $tagId   = $tag->id;
+                }
+            }
+
+            $newType = $request->input('type', $movement->type);
+
+            $movement->update([
+                'type'                => $newType,
+                'amount'              => $request->input('amount', $movement->amount),
+                'description'         => $request->input('description', $movement->description),
+                'payment_method'      => $request->input('payment_method', $movement->payment_method),
+                'has_invoice'         => $request->input('has_invoice', $movement->has_invoice),
+                'is_business_expense' => $request->input('is_business_expense', $movement->is_business_expense),
+                'rent_type'           => $newType === 'income' ? $request->input('rent_type', $movement->rent_type) : null,
+                'tag_id'              => $tagId,
+            ]);
+
+            $movement->load('tag');
+            DB::commit();
+
+            $budgetImpact = $this->computeBudgetImpact($user, $movement);
+
+            Log::info("Movement {$movement->id} updated by user {$user->id}");
+
+            return $this->successResponse([
+                'movement'      => new MovementResource($movement),
+                'budget_impact' => $budgetImpact,
+            ], 'Movimiento actualizado');
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return $this->errorResponse('Movimiento no encontrado', 404);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error('Error updating movement: ' . $e->getMessage());
+            return $this->errorResponse('Error al actualizar movimiento: ' . $this->safeMessage($e));
+        }
+    }
+
+    /**
+     * Delete a movement.
+     */
+    public function destroy($id): JsonResponse
+    {
+        try {
+            $user     = Auth::user();
+            $movement = Movement::where('user_id', $user->id)->findOrFail($id);
+
+            $movement->delete();
+
+            Log::info("Movement {$id} deleted by user {$user->id}");
+
+            return $this->successResponse(null, 'Movimiento eliminado');
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+            return $this->errorResponse('Movimiento no encontrado', 404);
+        } catch (\Exception $e) {
+            Log::error('Error deleting movement: ' . $e->getMessage());
+            return $this->errorResponse('Error al eliminar movimiento: ' . $this->safeMessage($e));
+        }
     }
 
     /**
