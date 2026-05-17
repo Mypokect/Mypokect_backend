@@ -665,8 +665,9 @@ class BudgetController extends Controller
             }
 
             $allTags = array_keys($tagToCatIndices);
-            $fromTs  = $from.' 00:00:00';
-            $toTs    = $to.' 23:59:59';
+            $tz     = 'America/Bogota';
+            $fromTs = \Carbon\Carbon::createFromFormat('Y-m-d', $from, $tz)->startOfDay()->utc()->toDateTimeString();
+            $toTs   = \Carbon\Carbon::createFromFormat('Y-m-d', $to, $tz)->endOfDay()->utc()->toDateTimeString();
 
             // ── PASO 2: Una sola query para todos los movimientos ──
             $totalSpent      = 0.0;
@@ -1275,8 +1276,10 @@ class BudgetController extends Controller
             }, $categories);
         }
 
-        $from   = $budget->date_from->format('Y-m-d').' 00:00:00';
-        $to     = min($budget->date_to ?? now(), now())->format('Y-m-d').' 23:59:59';
+        $tz          = 'America/Bogota';
+        $effectiveTo = min($budget->date_to ?? now(), now());
+        $from        = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)->startOfDay()->utc()->toDateTimeString();
+        $to          = \Carbon\Carbon::createFromFormat('Y-m-d', $effectiveTo->format('Y-m-d'), $tz)->endOfDay()->utc()->toDateTimeString();
         $userId = $budget->user_id;
 
         // Build tag → first category index map (simple, no keyword disambiguation)
