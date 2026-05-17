@@ -1245,6 +1245,44 @@ class BudgetController extends Controller
     }
 
     /**
+     * Links existing movements to a budget category by updating their tag.
+     * POST /budgets/{budget}/link-movements
+     * Body: { movement_ids: int[], category_name: string }
+     */
+    public function linkMovements(Request $request, Budget $budget): JsonResponse
+    {
+        $user = $request->user();
+        if ($budget->user_id !== $user->id) {
+            return $this->errorResponse('No autorizado', 403);
+        }
+
+        $request->validate([
+            'movement_ids'   => 'required|array|min:1',
+            'movement_ids.*' => 'integer|min:1',
+            'category_name'  => 'required|string|max:255',
+        ]);
+
+        $category = $budget->categories()->where('name', $request->category_name)->first();
+        if (! $category) {
+            return $this->errorResponse('Categoría no encontrada en el presupuesto', 404);
+        }
+
+        $tagNames = $this->extractTagNames($category->linked_tags ?? []);
+        $tagName  = ! empty($tagNames) ? $tagNames[0] : $request->category_name;
+
+        $tag = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+
+        $updated = Movement::where('user_id', $user->id)
+            ->whereIn('id', $request->movement_ids)
+            ->update(['tag_id' => $tag->id]);
+
+        return $this->successResponse(
+            ['linked' => $updated, 'tag' => $tagName],
+            "$updated movimiento(s) vinculado(s) exitosamente."
+        );
+    }
+
+    /**
      * Returns 'green' (<75%), 'yellow' (75-99%), 'red' (>=100%) based on spend ratio.
      */
     private function estadoColor(float $spent, float $budgeted): string

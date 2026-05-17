@@ -114,6 +114,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::get('/budgets/{budget}/suggested-tags', [BudgetController::class, 'getSuggestedTags'])->middleware('throttle:10,1');
     Route::delete('/budgets/{budget}/suggested-tags-cache', [BudgetController::class, 'clearSuggestedTagsCache']);
     Route::post('/budgets/{budget}/apply-ai-tags', [BudgetController::class, 'applyAITags']);
+    Route::post('/budgets/{budget}/link-movements', [BudgetController::class, 'linkMovements']);
     Route::post('/budgets/{budget}/move-movement', [BudgetController::class, 'moveMovement']);
     Route::post('/budgets/{budget}/reactivate', [BudgetController::class, 'reactivateBudget']);
     Route::post('/budgets/{budget}/duplicate', [BudgetController::class, 'duplicateBudget']);
