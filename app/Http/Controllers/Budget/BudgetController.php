@@ -80,14 +80,20 @@ class BudgetController extends Controller
                         }
                     }
 
+                    $baseQuery = Movement::where('user_id', $user->id)
+                        ->where('type', 'expense')
+                        ->whereBetween('created_at', [$from, $to]);
+
                     if (! empty($linkedTags)) {
-                        $totalSpent = Movement::where('user_id', $user->id)
-                            ->where('type', 'expense')
-                            ->whereBetween('created_at', [$from, $to])
+                        // Linked tags configured: count only tracked expenses
+                        $totalSpent = (clone $baseQuery)
                             ->whereHas('tag', function ($q) use ($linkedTags) {
                                 $q->whereIn('name', $linkedTags);
                             })
                             ->sum('amount');
+                    } else {
+                        // No linked tags yet: fall back to ALL expenses in period
+                        $totalSpent = $baseQuery->sum('amount');
                     }
                 }
 
