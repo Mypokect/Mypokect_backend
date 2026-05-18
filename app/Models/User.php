@@ -19,6 +19,7 @@ class User extends Authenticatable
         'phone',
         'fcm_token',
         'savings_mode_pct',
+        'savings_mode_amount',
         'has_active_challenge',
         'challenge_savings_balance',
     ];
@@ -29,6 +30,7 @@ class User extends Authenticatable
         'password'                  => 'hashed',
         'has_active_challenge'      => 'boolean',
         'savings_mode_pct'          => 'float',
+        'savings_mode_amount'       => 'float',
         'challenge_savings_balance' => 'float',
     ];
 

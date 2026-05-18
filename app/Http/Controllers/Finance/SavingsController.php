@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Finance;
 
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
+use App\Models\SavingGoal;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -26,13 +27,17 @@ class SavingsController extends Controller
     ];
 
     /**
-     * Analyze savings capacity and return three pre-calculated plans.
-     * Also includes Alcancía con Fuga data (fuga acumulada del mes).
+     * Analyze savings capacity.
+     *
+     * Optional GET param: valor_ahorro_deseado (amount in COP).
+     * When provided, returns custom_analysis with survival budget, risk flag,
+     * and time-to-goal calculation for the user's first active SavingGoal.
      */
-    public function analyze(): JsonResponse
+    public function analyze(Request $request): JsonResponse
     {
         try {
             $user = Auth::user();
+            $valorAhorroDeseado = (float) ($request->query('valor_ahorro_deseado') ?? 0);
 
             $startOfMonth = Carbon::now()->startOfMonth();
             $endOfMonth   = Carbon::now()->endOfMonth();
@@ -47,8 +52,10 @@ class SavingsController extends Controller
                 ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
                 ->sum('amount') ?? 0.0);
 
-            $disponible = $incomes - $expenses;
+            $disponible          = $incomes - $expenses;
+            $gastoPromedioDiario = $expenses > 0 ? round($expenses / 30, 2) : 0.0;
 
+            // ── Three pre-configured plans (backward compat) ─────────────────
             $planes = array_map(function (array $cfg) use ($incomes, $disponible) {
                 $ahorro   = round($incomes * $cfg['porcentaje'], 2);
                 $diario   = round(($disponible - $ahorro) / 30, 2);
@@ -73,11 +80,58 @@ class SavingsController extends Controller
                 ];
             }, self::PLANES_CONFIG);
 
+            // ── Custom analysis for a specific money amount ───────────────────
+            $customAnalysis = null;
+            if ($valorAhorroDeseado > 0) {
+                $presupuestoDiarioRestante = round(($incomes - $expenses - $valorAhorroDeseado) / 30, 2);
+                $riesgoIncumplimiento      = $presupuestoDiarioRestante < $gastoPromedioDiario;
+
+                $mesesParaMeta = null;
+                $metaNombre    = null;
+                $metaTotal     = null;
+                $metaRestante  = null;
+
+                $goal = SavingGoal::where('user_id', $user->id)
+                    ->whereIn('status', ['active', 'pending', 'en_progreso', 'in_progress'])
+                    ->orderBy('created_at', 'desc')
+                    ->first();
+
+                if (! $goal) {
+                    $goal = SavingGoal::where('user_id', $user->id)
+                        ->whereNull('deleted_at')
+                        ->orderBy('created_at', 'desc')
+                        ->first();
+                }
+
+                if ($goal) {
+                    $metaTotal    = (float) $goal->target_amount;
+                    $savedAmount  = (float) $goal->contributions()->sum('amount');
+                    $metaRestante = max(0.0, $metaTotal - $savedAmount);
+                    $mesesParaMeta = $valorAhorroDeseado > 0
+                        ? (int) ceil($metaRestante / $valorAhorroDeseado)
+                        : null;
+                    $metaNombre = $goal->name;
+                }
+
+                $customAnalysis = [
+                    'valor_ahorro_deseado'        => $valorAhorroDeseado,
+                    'presupuesto_diario_restante' => $presupuestoDiarioRestante,
+                    'gasto_promedio_diario'       => $gastoPromedioDiario,
+                    'riesgo_incumplimiento'       => $riesgoIncumplimiento,
+                    'es_viable'                   => $presupuestoDiarioRestante >= 0,
+                    'meses_para_meta'             => $mesesParaMeta,
+                    'meta_nombre'                 => $metaNombre,
+                    'meta_total'                  => $metaTotal,
+                    'meta_restante'               => $metaRestante,
+                ];
+            }
+
             $aiResponse = $this->consultarCoachIA($incomes, $expenses);
 
             // ── Alcancía con Fuga ─────────────────────────────────────────────
             $hasActiveChallenge    = false;
             $savingsPct            = 0.0;
+            $savingsAmount         = 0.0;
             $ahorroReservadoMes    = 0.0;
             $ahorroProtegidoActual = 0.0;
             $dineroFugadoMes       = 0.0;
@@ -85,10 +139,14 @@ class SavingsController extends Controller
 
             if (Schema::hasColumn('users', 'has_active_challenge')) {
                 $hasActiveChallenge = (bool) $user->has_active_challenge;
-                $savingsPct         = (float) ($user->savings_mode_pct ?? 0.0);
+                $savingsPct         = (float) ($user->savings_mode_pct    ?? 0.0);
+                $savingsAmount      = (float) ($user->savings_mode_amount ?? 0.0);
 
-                if ($hasActiveChallenge && $savingsPct > 0) {
-                    $ahorroReservadoMes = round($incomes * $savingsPct, 2);
+                if ($hasActiveChallenge) {
+                    // Use the saved money amount directly if available; fall back to pct
+                    $ahorroReservadoMes = $savingsAmount > 0
+                        ? $savingsAmount
+                        : round($incomes * $savingsPct, 2);
 
                     $ahorroProtegidoActual = Schema::hasColumn('users', 'challenge_savings_balance')
                         ? (float) ($user->challenge_savings_balance ?? $ahorroReservadoMes)
@@ -106,10 +164,14 @@ class SavingsController extends Controller
             return $this->successResponse([
                 'ingresos'                => $incomes,
                 'gastos'                  => $expenses,
+                'capacidad_neta'          => max(0.0, $disponible),
+                'gasto_promedio_diario'   => $gastoPromedioDiario,
                 'planes'                  => $planes,
                 'ai_insight'              => $aiResponse,
+                'custom_analysis'         => $customAnalysis,
                 'has_active_challenge'    => $hasActiveChallenge,
                 'savings_mode_pct'        => $savingsPct,
+                'savings_mode_amount'     => $savingsAmount,
                 'ahorro_reservado_mes'    => $ahorroReservadoMes,
                 'ahorro_protegido_actual' => $ahorroProtegidoActual,
                 'dinero_fugado_mes'       => $dineroFugadoMes,
@@ -124,54 +186,65 @@ class SavingsController extends Controller
     }
 
     /**
-     * Persist the user's chosen savings mode percentage.
-     * Resets challenge_savings_balance to the reserved amount for the current month.
+     * Persist the user's chosen savings amount (in COP).
+     * Also derives and stores the equivalent pct for backward compat.
      */
     public function savePlan(Request $request): JsonResponse
     {
         $request->validate([
-            'pct' => ['required', 'numeric', 'between:0.01,0.50'],
+            'monto' => ['required', 'numeric', 'min:0'],
         ]);
 
-        $pct  = round((float) $request->pct, 4);
-        $user = Auth::user();
+        $monto = round((float) $request->monto, 2);
+        $user  = Auth::user();
 
         $incomesMes = (float) ($user->movements()
             ->where('type', 'income')
             ->whereBetween('created_at', [now()->startOfMonth(), now()->endOfMonth()])
             ->sum('amount') ?? 0.0);
 
-        $ahorroReservado = round($incomesMes * $pct, 2);
+        $pct = ($incomesMes > 0 && $monto > 0)
+            ? min(0.9999, round($monto / $incomesMes, 4))
+            : 0.0;
 
         $updateData = ['savings_mode_pct' => $pct];
+
+        if (Schema::hasColumn('users', 'savings_mode_amount')) {
+            $updateData['savings_mode_amount'] = $monto;
+        }
 
         if (Schema::hasColumn('users', 'has_active_challenge')) {
             $updateData['has_active_challenge'] = true;
         }
 
         if (Schema::hasColumn('users', 'challenge_savings_balance')) {
-            $updateData['challenge_savings_balance'] = $ahorroReservado;
+            $updateData['challenge_savings_balance'] = $monto;
         }
 
         $user->update($updateData);
 
         return $this->successResponse([
             'saved'                   => true,
+            'savings_mode_amount'     => $monto,
             'savings_mode_pct'        => $pct,
             'has_active_challenge'    => true,
-            'ahorro_reservado_mes'    => $ahorroReservado,
-            'ahorro_protegido_actual' => $ahorroReservado,
+            'ahorro_reservado_mes'    => $monto,
+            'ahorro_protegido_actual' => $monto,
             'dinero_fugado_mes'       => 0.0,
         ], 'Plan de ahorro activado.');
     }
 
     /**
-     * Cancel the active savings challenge and zero out all savings fields.
+     * Cancel the active savings challenge.
      */
     public function cancelPlan(): JsonResponse
     {
         $user       = Auth::user();
         $updateData = ['savings_mode_pct' => 0];
+
+        if (Schema::hasColumn('users', 'savings_mode_amount')) {
+            $updateData['savings_mode_amount'] = 0;
+        }
 
         if (Schema::hasColumn('users', 'has_active_challenge')) {
             $updateData['has_active_challenge'] = false;
@@ -187,6 +260,7 @@ class SavingsController extends Controller
             'cancelled'               => true,
             'has_active_challenge'    => false,
             'savings_mode_pct'        => 0,
+            'savings_mode_amount'     => 0.0,
             'ahorro_reservado_mes'    => 0.0,
             'ahorro_protegido_actual' => 0.0,
             'dinero_fugado_mes'       => 0.0,
