@@ -242,9 +242,13 @@ class ScheduledTransactionController extends Controller
     public function destroy(ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
+
+        // Delete pending occurrences explicitly (FK cascade also handles this,
+        // but being explicit ensures future calendar dots disappear immediately).
+        $scheduledTransaction->occurrences()->where('is_paid', false)->delete();
         $scheduledTransaction->delete();
 
-        return $this->noContentResponse();
+        return $this->successResponse(null, 'Recordatorio eliminado y calendario limpio');
     }
 
     // ─── togglePaidStatus ─────────────────────────────────────────────────────
