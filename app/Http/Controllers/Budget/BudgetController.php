@@ -1289,6 +1289,71 @@ class BudgetController extends Controller
     }
 
     /**
+     * Permanently re-tag a movement so it belongs to the first linked tag of a target budget.
+     *
+     * @bodyParam movement_id      int required Movement to reassign. Example: 42
+     * @bodyParam target_budget_id int required Target budget ID.     Example: 7
+     */
+    public function reassignMovement(Request $request): JsonResponse
+    {
+        try {
+            $user = Auth::user();
+
+            $validated = Validator::make($request->all(), [
+                'movement_id'      => 'required|integer|min:1',
+                'target_budget_id' => 'required|integer|min:1',
+            ]);
+            if ($validated->fails()) {
+                return $this->validationErrorResponse($validated->errors());
+            }
+
+            $movId    = (int) $request->input('movement_id');
+            $targetId = (int) $request->input('target_budget_id');
+
+            $targetBudget = Budget::where('id', $targetId)
+                ->where('user_id', $user->id)
+                ->with('categories')
+                ->first();
+
+            if (! $targetBudget) {
+                return $this->errorResponse('Presupuesto destino no encontrado', 404);
+            }
+
+            // Pick the first linked tag found in any category of the target budget
+            $tagName = null;
+            foreach ($targetBudget->categories as $cat) {
+                $names = $this->extractTagNames($cat->linked_tags ?? []);
+                if (! empty($names)) {
+                    $tagName = $names[0];
+                    break;
+                }
+            }
+            // Fallback: derive a tag from the budget title
+            if (! $tagName) {
+                $tagName = $targetBudget->title;
+            }
+
+            $tag     = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+            $updated = Movement::where('user_id', $user->id)
+                ->where('id', $movId)
+                ->update(['tag_id' => $tag->id]);
+
+            if (! $updated) {
+                return $this->errorResponse('Movimiento no encontrado o no autorizado', 404);
+            }
+
+            return $this->successResponse(
+                ['tag' => $tagName, 'target_budget' => $targetBudget->title],
+                'Movimiento reasignado correctamente.'
+            );
+
+        } catch (\Exception $e) {
+            Log::error('Error reassigning movement: ' . $e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
+
+    /**
      * Returns 'green' (<75%), 'yellow' (75-99%), 'red' (>=100%) based on spend ratio.
      */
     private function estadoColor(float $spent, float $budgeted): string

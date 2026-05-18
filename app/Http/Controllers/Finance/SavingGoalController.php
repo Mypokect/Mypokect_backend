@@ -85,8 +85,7 @@ class SavingGoalController extends Controller
                 'emoji'           => $request->input('emoji'),
                 'cuenta_asociada' => $request->input('cuenta_asociada'),
                 'money_location'  => $request->input('money_location', 'Efectivo'),
-                'is_digital'      => $request->input('is_digital', false),
-                'location_name'   => $request->input('location_name'),
+                // is_digital and location_name are captured per-contribution, not per-goal
             ]);
 
             $goal->saved_amount      = 0;

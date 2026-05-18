@@ -105,6 +105,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
     // Rutas de creación
     Route::post('/budgets/manual', [BudgetController::class, 'createManualBudget']);
+    Route::post('/budgets/reassign-movement', [BudgetController::class, 'reassignMovement']);
     Route::post('/budgets/ai/generate', [BudgetController::class, 'generateAIBudget'])->middleware('throttle:10,1');
     Route::post('/budgets/ai/save', [BudgetController::class, 'saveAIBudget']);
 
