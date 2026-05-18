@@ -60,18 +60,19 @@ class ScheduledTransactionController extends Controller
 
         foreach ($transactions as $tx) {
             if ($tx->recurrence_type === 'none') {
-                $d = Carbon::parse($tx->start_date->toDateString());
+                // Preserve full datetime (not just date) so time is included.
+                $d = Carbon::parse($tx->start_date);
                 if ($d->between($startOfMonth, $endOfMonth)) {
                     $result[] = $this->buildEvent(
                         $tx,
-                        $d->toDateString(),
+                        $d->toIso8601String(),
                         $paidMap[$d->toDateString()][$tx->id] ?? false
                     );
                 }
                 continue;
             }
 
-            $current  = Carbon::parse($tx->start_date->toDateString());
+            $current  = Carbon::parse($tx->start_date); // full datetime
             $interval = max(1, (int) $tx->recurrence_interval);
 
             // Fast-forward to the first occurrence inside (or just before) the month
@@ -83,7 +84,7 @@ class ScheduledTransactionController extends Controller
                 if ($current->greaterThanOrEqualTo($startOfMonth)) {
                     $result[] = $this->buildEvent(
                         $tx,
-                        $current->toDateString(),
+                        $current->toIso8601String(),
                         $paidMap[$current->toDateString()][$tx->id] ?? false
                     );
                 }
@@ -96,7 +97,7 @@ class ScheduledTransactionController extends Controller
                     default: break 2;
                 }
 
-                if ($tx->end_date && $current->isAfter(Carbon::parse($tx->end_date->toDateString()))) {
+                if ($tx->end_date && $current->isAfter(Carbon::parse($tx->end_date))) {
                     break;
                 }
             }
@@ -145,6 +146,8 @@ class ScheduledTransactionController extends Controller
         $events = $occurrences->map(fn ($o) => [
             'id'                       => $o->id,
             'scheduled_transaction_id' => $o->scheduled_transaction_id,
+            // Return full ISO-8601 datetime so Flutter can display the time.
+            'datetime'                 => Carbon::parse($o->due_date)->toIso8601String(),
             'date'                     => Carbon::parse($o->due_date)->toDateString(),
             'title'                    => $o->title,
             'amount'                   => (float) $o->amount,
@@ -166,10 +169,10 @@ class ScheduledTransactionController extends Controller
             'amount'               => 'required|numeric|min:0',
             'type'                 => 'required|string|in:expense,income',
             'category'             => 'nullable|string|max:100',
-            'start_date'           => 'required|date_format:Y-m-d',
+            'start_date'           => 'required|date',
             'recurrence_type'      => 'required|string|in:none,daily,weekly,monthly,yearly',
             'recurrence_interval'  => 'required_if:recurrence_type,!=,none|nullable|integer|min:1',
-            'end_date'             => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+            'end_date'             => 'nullable|date|after_or_equal:start_date',
             'reminder_days_before' => 'nullable|integer|min:0',
         ]);
         if ($validator->fails()) {
@@ -208,10 +211,10 @@ class ScheduledTransactionController extends Controller
             'amount'               => 'sometimes|numeric|min:0',
             'type'                 => 'sometimes|string|in:expense,income',
             'category'             => 'nullable|string|max:100',
-            'start_date'           => 'sometimes|date_format:Y-m-d',
+            'start_date'           => 'sometimes|date',
             'recurrence_type'      => 'sometimes|string|in:none,daily,weekly,monthly,yearly',
             'recurrence_interval'  => 'nullable|integer|min:1',
-            'end_date'             => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+            'end_date'             => 'nullable|date|after_or_equal:start_date',
             'reminder_days_before' => 'nullable|integer|min:0',
         ]);
         if ($validator->fails()) {

@@ -20,8 +20,8 @@ class TransactionOccurrence extends Model
     ];
 
     protected $casts = [
-        'due_date' => 'date',
-        'is_paid' => 'boolean',
+        'due_date' => 'datetime',
+        'is_paid'  => 'boolean',
     ];
 
     public function scheduledTransaction(): BelongsTo

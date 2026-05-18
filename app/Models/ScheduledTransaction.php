@@ -16,9 +16,9 @@ class ScheduledTransaction extends Model
     ];
 
     protected $casts = [
-        'start_date' => 'date',
-        'end_date' => 'date',
-        'amount' => 'decimal:2',
+        'start_date' => 'datetime',
+        'end_date'   => 'datetime',
+        'amount'     => 'decimal:2',
     ];
 
     public function occurrences(): HasMany
