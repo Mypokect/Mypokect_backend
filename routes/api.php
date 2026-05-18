@@ -61,7 +61,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
     // IA de Voz para Movimientos (Entiende gasto/ingreso + monto + metodo de pago)
     Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
-        ->middleware('throttle:10,1');
+        ->middleware('throttle:30,1');
 
     // 3. ETIQUETAS (TAGS)
     Route::get('/tags', [TagController::class, 'index']);
