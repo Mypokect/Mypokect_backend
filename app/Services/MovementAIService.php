@@ -561,47 +561,53 @@ PROMPT;
         $movementsText = implode("\n", $movementsList);
 
         $prompt = <<<PROMPT
-ROL: Eres un analista de presupuesto personal. Tu función es asignar cada movimiento individual a su categoría de presupuesto correcta.
+Classify each financial transaction into EXACTLY ONE budget category.
 
-CONTEXTO: El usuario tiene un presupuesto con categorías predefinidas. Cada movimiento tiene una etiqueta (tag) general y una descripción específica. La misma etiqueta puede corresponder a categorías distintas según la descripción del movimiento.
+RULES:
+- Priority: description > merchant/keywords > tag.
+- If description is empty, generic, or "sin descripción" → use tag.
+- Use ONLY existing categories.
+- ALL categories must appear in output.
+- Each index must appear ONCE only.
+- Never invent categories.
+- No explanations.
+- Output ONLY valid JSON.
+- Keep category names EXACTLY as received.
+- Understand input in any language.
+- Preserve original language in output.
 
-OBJETIVO: Asignar cada movimiento (identificado por su índice) a exactamente UNA categoría de presupuesto.
+KEYWORDS:
+Uber,Didi,taxi,TransMilenio,bus,gasolina,peaje → Transporte
+D1,Éxito,Jumbo,Carulla,Ara,supermercado → Mercado
+Rappi,restaurante,almuerzo,café,McDonald's → Comida
+Netflix,Spotify,Disney,cine,Steam,videojuego → Entretenimiento
+arriendo,alquiler,administración,predial → Vivienda
+luz,agua,gas,internet,Claro,Movistar,Tigo,EPM → Servicios
+farmacia,droguería,médico,EPS,hospital → Salud
+universidad,colegio,curso,Udemy,Coursera → Educación
+ropa,zapatos,Zara,Nike,H&M → Ropa
+gimnasio,gym,Bodytech,deporte → Deporte
+banco,crédito,préstamo,Nequi,Daviplata → Finanzas
+hotel,hospedaje,Airbnb → Hospedaje
 
-CONDICIONES:
-- La DESCRIPCIÓN tiene mayor prioridad que el nombre del tag para la clasificación.
-- Si la descripción dice "sin descripción" → usa el nombre del tag para matching semántico.
-- Cada movimiento va a exactamente UNA categoría (la más específica que corresponda).
-- TODAS las categorías deben aparecer en el JSON de salida (usa [] si ningún movimiento le corresponde).
-- Usa los nombres EXACTOS de las categorías (sensible a mayúsculas/minúsculas).
-- Responde SOLO con el JSON. Sin explicaciones, sin Markdown, sin texto adicional.
-- NUNCA uses "Otros" ni "Other" — siempre asigna a la categoría más cercana disponible.
+VALIDATE:
+- no repeated indexes
+- no missing indexes
+- valid JSON
+- all categories included
 
-MERCHANT→CATEGORY RULES (úsalas para desambiguar):
-Uber/Didi/taxi/TransMilenio/bus/gasolina → Transporte
-D1/Éxito/Jumbo/Carulla/Ara/supermercado → Mercado
-Rappi/restaurante/almuerzo/café/McDonald's → Comida
-Netflix/Spotify/Disney/cine/videojuego → Entretenimiento
-arriendo/administración/predial → Vivienda
-luz/agua/internet/Claro/Movistar/EPM/gas → Servicios
-farmacia/médico/EPS/hospital/droguería → Salud
-universidad/colegio/curso → Educación
-ropa/zapatos/Zara/Nike → Ropa
-gimnasio/gym/deporte → Deporte
-banco/crédito/préstamo/Nequi → Finanzas
+Categories:
+[$categoriesList]
 
-EJEMPLOS AMBIGUOS (mismo tag, categorías distintas):
-- [0] Tag:"Servicio" Desc:"hotel marriott"     → categoría "Hospedaje"
-- [1] Tag:"Servicio" Desc:"taxi al centro"     → categoría "Transporte"
-- [2] Tag:"Varios"   Desc:"almuerzo ejecutivo" → categoría "Comida"
-- [3] Tag:"Varios"   Desc:"sin descripción"    → categoría más similar al nombre del tag
-
-ENTRADA:
-Categorías: [$categoriesList]
-Movimientos (formato [índice] Tag: "..." | Desc: "..." | $monto):
+Transactions:
 $movementsText
 
-FORMATO DE SALIDA (JSON puro, valores = arrays de índices de movimientos):
-{"NombreCategoria": [0, 5, 12], "OtraCategoria": [1, 3], "CategoriaVacia": []}
+Output example:
+{
+  "Comida": [0,2],
+  "Transporte": [1],
+  "Mercado": []
+}
 PROMPT;
 
         Log::info('Llamando a Groq para analizar movimientos individuales', [
