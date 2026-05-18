@@ -24,6 +24,7 @@ class ReminderControllerTest extends TestCase
     {
         $data = [
             'title' => 'Pago tarjeta de crédito',
+            'type' => 'expense',
             'amount' => 500000,
             'category' => 'Tarjetas',
             'note' => 'Pago mensual',
@@ -61,6 +62,7 @@ class ReminderControllerTest extends TestCase
     {
         $data = [
             'title' => 'Arriendo',
+            'type' => 'expense',
             'amount' => 1200000,
             'category' => 'Vivienda',
             'due_date' => now()->addMonth()->toIso8601String(),
@@ -107,8 +109,8 @@ class ReminderControllerTest extends TestCase
             'due_date' => now()->addDays(20),
         ]);
 
-        $start = now()->startOfDay()->toIso8601String();
-        $end = now()->addDays(15)->endOfDay()->toIso8601String();
+        $start = now()->startOfDay()->format('Y-m-d');
+        $end   = now()->addDays(15)->format('Y-m-d');
 
         $response = $this->actingAs($this->user, 'sanctum')
             ->getJson("/api/v1/calendar/reminders?start={$start}&end={$end}");

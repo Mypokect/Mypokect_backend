@@ -44,7 +44,16 @@ class ReminderController extends Controller
         $end    = Carbon::parse($request->end);
         $status = $request->input('status', 'all');
 
-        $query = Reminder::where('user_id', $request->user()->id)->dateRange($start, $end);
+        // Include both one-off reminders within the range AND recurring reminders
+        // that started before the end of the range (they expand into future months).
+        $query = Reminder::where('user_id', $request->user()->id)
+            ->where(function ($q) use ($start, $end) {
+                $q->whereBetween('due_date', [$start, $end])
+                  ->orWhere(function ($q2) use ($end) {
+                      $q2->where('recurrence', '!=', 'none')
+                         ->where('due_date', '<=', $end);
+                  });
+            });
 
         if ($status !== 'all') {
             $query->where('status', $status);

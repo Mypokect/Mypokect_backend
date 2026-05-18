@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\ScheduledTransaction;
 use App\Models\TransactionOccurrence;
+use App\Services\OccurrenceCalculatorService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,187 +17,188 @@ class ScheduledTransactionController extends Controller
 {
     use ApiResponse;
 
+    // ─── index: calendar view for a month ────────────────────────────────────
+
     /**
-     * List scheduled transaction occurrences.
-     *
-     * Returns all calculated occurrences for a given month/year with paid status.
-     *
-     * @queryParam month int required Month number (1-12). Example: 3
-     * @queryParam year int required Year. Example: 2026
+     * @queryParam month int required Month 1-12. Example: 3
+     * @queryParam year  int required Year.       Example: 2026
      */
     public function index(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'month' => 'required|integer|between:1,12',
-            'year' => 'required|integer',
+            'year'  => 'required|integer',
         ]);
         if ($validator->fails()) {
             return $this->validationErrorResponse($validator->errors());
         }
 
-        $user = Auth::user();
-        $month = $request->input('month');
-        $year = $request->input('year');
+        $user         = Auth::user();
+        $month        = (int) $request->month;
+        $year         = (int) $request->year;
         $startOfMonth = Carbon::create($year, $month, 1)->startOfDay();
-        $endOfMonth = $startOfMonth->copy()->endOfMonth();
+        $endOfMonth   = $startOfMonth->copy()->endOfMonth();
 
-        // --- LÓGICA CORREGIDA Y EFICIENTE ---
-        // 1. Obtenemos un mapa de todos los pagos ya realizados en este mes.
-        // El formato será: ['2025-11-06' => [1 => true], '2025-11-15' => [2 => true]]
-        // Significa: en la fecha X, la transacción con id Y está pagada.
-        $paidOccurrencesMap = TransactionOccurrence::query()
+        // Build a quick-lookup map: stid+date → is_paid
+        $paidMap = TransactionOccurrence::query()
             ->whereHas('scheduledTransaction', fn ($q) => $q->where('user_id', $user->id))
             ->whereBetween('due_date', [$startOfMonth, $endOfMonth])
             ->where('is_paid', true)
             ->get(['due_date', 'scheduled_transaction_id'])
             ->groupBy(fn ($item) => $item->due_date->format('Y-m-d'))
-            ->map(fn ($itemsOnDate) => $itemsOnDate->keyBy('scheduled_transaction_id')->map(fn () => true))
+            ->map(fn ($g) => $g->keyBy('scheduled_transaction_id')->map(fn () => true))
             ->all();
 
-        // 2. Obtenemos las transacciones que podrían tener ocurrencias
-        $potentialTransactions = $user->scheduledTransactions()
+        // Active transactions that overlap with this month
+        $transactions = $user->scheduledTransactions()
             ->where('start_date', '<=', $endOfMonth)
-            ->where(function ($query) use ($startOfMonth) {
-                $query->whereNull('end_date')->orWhere('end_date', '>=', $startOfMonth);
+            ->where(function ($q) use ($startOfMonth) {
+                $q->whereNull('end_date')->orWhere('end_date', '>=', $startOfMonth);
             })->get();
 
-        $occurrencesResult = [];
+        $result = [];
 
-        // 3. Calculamos las ocurrencias en PHP
-        foreach ($potentialTransactions as $transaction) {
-            if ($transaction->recurrence_type === 'none') {
-                $transactionDate = Carbon::parse($transaction->start_date);
-                if ($transactionDate->between($startOfMonth, $endOfMonth)) {
-                    // Verificamos en nuestro mapa si esta fecha/id está pagada
-                    $paidStatus = $paidOccurrencesMap[$transactionDate->toDateString()][$transaction->id] ?? false;
-                    $occurrencesResult[] = $this->createOccurrence($transaction, $transactionDate->toDateString(), $paidStatus);
+        foreach ($transactions as $tx) {
+            if ($tx->recurrence_type === 'none') {
+                $d = Carbon::parse($tx->start_date->toDateString());
+                if ($d->between($startOfMonth, $endOfMonth)) {
+                    $result[] = $this->buildEvent(
+                        $tx,
+                        $d->toDateString(),
+                        $paidMap[$d->toDateString()][$tx->id] ?? false
+                    );
                 }
-
                 continue;
             }
 
-            $currentDate = Carbon::parse($transaction->start_date);
-            while ($currentDate->lessThanOrEqualTo($endOfMonth)) {
-                if ($currentDate->greaterThanOrEqualTo($startOfMonth)) {
-                    // Verificamos en nuestro mapa si esta fecha/id está pagada
-                    $paidStatus = $paidOccurrencesMap[$currentDate->toDateString()][$transaction->id] ?? false;
-                    $occurrencesResult[] = $this->createOccurrence($transaction, $currentDate->toDateString(), $paidStatus);
+            $current  = Carbon::parse($tx->start_date->toDateString());
+            $interval = max(1, (int) $tx->recurrence_interval);
+
+            // Fast-forward to the first occurrence inside (or just before) the month
+            if ($current->lessThan($startOfMonth)) {
+                $current = $this->fastForwardToMonth($tx, $current, $startOfMonth);
+            }
+
+            while ($current->lessThanOrEqualTo($endOfMonth)) {
+                if ($current->greaterThanOrEqualTo($startOfMonth)) {
+                    $result[] = $this->buildEvent(
+                        $tx,
+                        $current->toDateString(),
+                        $paidMap[$current->toDateString()][$tx->id] ?? false
+                    );
                 }
 
-                // Lógica para avanzar la fecha (sin cambios)
-                if ($currentDate->isBefore($startOfMonth)) {
-                    $currentDate = $startOfMonth->copy()->day($transaction->start_date->day);
-                    if ($currentDate->isBefore($startOfMonth)) {
-                        $currentDate->addMonth();
-                    }
-                } else {
-                    switch ($transaction->recurrence_type) {
-                        case 'daily': $currentDate->addDays($transaction->recurrence_interval);
-                            break;
-                        case 'weekly': $currentDate->addWeeks($transaction->recurrence_interval);
-                            break;
-                        case 'monthly': $currentDate->addMonthsNoOverflow($transaction->recurrence_interval);
-                            break;
-                        case 'yearly': $currentDate->addYearsNoOverflow($transaction->recurrence_interval);
-                            break;
-                        default: break 2;
-                    }
+                switch ($tx->recurrence_type) {
+                    case 'daily':   $current->addDays($interval);              break;
+                    case 'weekly':  $current->addWeeks($interval);             break;
+                    case 'monthly': $current->addMonthsNoOverflow($interval);  break;
+                    case 'yearly':  $current->addYearsNoOverflow($interval);   break;
+                    default: break 2;
                 }
-                if ($transaction->end_date && $currentDate->isAfter($transaction->end_date)) {
+
+                if ($tx->end_date && $current->isAfter(Carbon::parse($tx->end_date->toDateString()))) {
                     break;
                 }
             }
         }
 
-        return $this->successResponse($occurrencesResult);
+        return $this->successResponse($result);
     }
 
+    // ─── getEvents: range-based view (reads persisted occurrences) ────────────
+
     /**
-     * Create a scheduled transaction.
-     *
-     * @bodyParam title string required Transaction title. Example: Arriendo
-     * @bodyParam amount number required Amount. Example: 1200000
-     * @bodyParam type string required Type: expense or income. Example: expense
-     * @bodyParam category string optional Category label. Example: Vivienda
-     * @bodyParam start_date string required Start date (Y-m-d). Example: 2026-03-01
-     * @bodyParam recurrence_type string required Recurrence: none, daily, weekly, monthly, yearly. Example: monthly
-     * @bodyParam recurrence_interval int optional Interval (required if not none). Example: 1
-     * @bodyParam end_date string optional End date (Y-m-d). Example: 2026-12-31
-     * @bodyParam reminder_days_before int optional Days before to remind. Example: 3
+     * @queryParam start string required Start date Y-m-d. Example: 2026-05-01
+     * @queryParam end   string required End   date Y-m-d. Example: 2026-05-31
      */
+    public function getEvents(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'start' => 'required|date_format:Y-m-d',
+            'end'   => 'required|date_format:Y-m-d|after_or_equal:start',
+        ]);
+        if ($validator->fails()) {
+            return $this->validationErrorResponse($validator->errors());
+        }
+
+        $user  = Auth::user();
+        $start = Carbon::parse($request->start)->startOfDay();
+        $end   = Carbon::parse($request->end)->endOfDay();
+
+        $occurrences = TransactionOccurrence::query()
+            ->join('scheduled_transactions as st', 'st.id', '=', 'transaction_occurrences.scheduled_transaction_id')
+            ->where('st.user_id', $user->id)
+            ->whereBetween('transaction_occurrences.due_date', [$start, $end])
+            ->orderBy('transaction_occurrences.due_date', 'asc')
+            ->select([
+                'transaction_occurrences.id',
+                'transaction_occurrences.scheduled_transaction_id',
+                'transaction_occurrences.due_date',
+                'transaction_occurrences.is_paid',
+                'st.title',
+                'st.amount',
+                'st.type',
+                'st.category',
+            ])
+            ->get();
+
+        $events = $occurrences->map(fn ($o) => [
+            'id'                       => $o->id,
+            'scheduled_transaction_id' => $o->scheduled_transaction_id,
+            'date'                     => Carbon::parse($o->due_date)->toDateString(),
+            'title'                    => $o->title,
+            'amount'                   => (float) $o->amount,
+            'type'                     => $o->type,
+            'category'                 => $o->category,
+            'is_paid'                  => (bool) $o->is_paid,
+            'color'                    => $o->type === 'income' ? 'green' : 'red',
+        ])->values();
+
+        return $this->successResponse($events);
+    }
+
+    // ─── store ────────────────────────────────────────────────────────────────
+
     public function store(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'title' => 'required|string|max:255', 'amount' => 'required|numeric|min:0',
-            'type' => 'required|string|in:expense,income', 'category' => 'nullable|string|max:100',
-            'start_date' => 'required|date_format:Y-m-d',
-            'recurrence_type' => 'required|string|in:none,daily,weekly,monthly,yearly',
-            'recurrence_interval' => 'required_if:recurrence_type,!=,none|nullable|integer|min:1',
-            'end_date' => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+            'title'                => 'required|string|max:255',
+            'amount'               => 'required|numeric|min:0',
+            'type'                 => 'required|string|in:expense,income',
+            'category'             => 'nullable|string|max:100',
+            'start_date'           => 'required|date_format:Y-m-d',
+            'recurrence_type'      => 'required|string|in:none,daily,weekly,monthly,yearly',
+            'recurrence_interval'  => 'required_if:recurrence_type,!=,none|nullable|integer|min:1',
+            'end_date'             => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
             'reminder_days_before' => 'nullable|integer|min:0',
         ]);
         if ($validator->fails()) {
             return $this->validationErrorResponse($validator->errors());
         }
+
         $transaction = Auth::user()->scheduledTransactions()->create($validator->validated());
 
-        // Pre-create the initial occurrence so the calendar reflects the entry immediately.
-        // The index() also calculates this dynamically, but persisting it guarantees
-        // the transaction appears even before the first calendar query for that month.
-        $transaction->occurrences()->updateOrCreate(
-            [
-                'scheduled_transaction_id' => $transaction->id,
-                'due_date'                 => $validator->validated()['start_date'],
-            ],
-            ['is_paid' => false]
-        );
+        $service = app(OccurrenceCalculatorService::class);
+        $count   = $service->generateAndStore($transaction);
 
-        return $this->createdResponse($transaction);
+        return $this->createdResponse([
+            'status'                => 'success',
+            'data'                  => $transaction->fresh(),
+            'occurrences_generated' => $count,
+        ]);
     }
 
-    /**
-     * Toggle paid status for an occurrence.
-     *
-     * Marks or unmarks a specific date's occurrence as paid.
-     *
-     * @bodyParam date string required Occurrence date (Y-m-d). Example: 2026-03-15
-     * @bodyParam is_paid boolean required Whether it's paid. Example: true
-     */
-    public function togglePaidStatus(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
-    {
-        $this->authorizeOwner($scheduledTransaction);
-        $validator = Validator::make($request->all(), ['date' => 'required|date_format:Y-m-d', 'is_paid' => 'required|boolean']);
-        if ($validator->fails()) {
-            return $this->validationErrorResponse($validator->errors());
-        }
-        $validatedData = $validator->validated();
+    // ─── show ─────────────────────────────────────────────────────────────────
 
-        $occurrence = $scheduledTransaction->occurrences()->updateOrCreate(
-            [
-                'scheduled_transaction_id' => $scheduledTransaction->id,
-                'due_date' => $validatedData['date'],
-            ],
-            [
-                'is_paid' => $validatedData['is_paid'],
-            ]
-        );
-
-        return $this->successResponse($occurrence);
-    }
-
-    /**
-     * Get a scheduled transaction.
-     */
     public function show(ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
 
-        return $this->successResponse($scheduledTransaction);
+        return $this->successResponse($scheduledTransaction->load('occurrences'));
     }
 
-    /**
-     * Update a scheduled transaction.
-     */
+    // ─── update ───────────────────────────────────────────────────────────────
+
     public function update(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
@@ -212,30 +214,31 @@ class ScheduledTransactionController extends Controller
             'end_date'             => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
             'reminder_days_before' => 'nullable|integer|min:0',
         ]);
-
         if ($validator->fails()) {
             return $this->validationErrorResponse($validator->errors());
         }
 
+        $recurrenceFields = ['start_date', 'end_date', 'recurrence_type', 'recurrence_interval', 'amount'];
+        $needsRegenerate  = collect($validator->validated())
+            ->keys()
+            ->intersect($recurrenceFields)
+            ->isNotEmpty();
+
         $scheduledTransaction->update($validator->validated());
 
-        // If start_date changed, upsert the initial occurrence for the new date.
-        if ($request->has('start_date')) {
-            $scheduledTransaction->occurrences()->updateOrCreate(
-                [
-                    'scheduled_transaction_id' => $scheduledTransaction->id,
-                    'due_date'                 => $validator->validated()['start_date'],
-                ],
-                ['is_paid' => false]
-            );
+        $service = app(OccurrenceCalculatorService::class);
+        if ($needsRegenerate) {
+            $service->regeneratePending($scheduledTransaction->fresh());
         }
 
-        return $this->successResponse($scheduledTransaction->fresh());
+        return $this->successResponse([
+            'status' => 'success',
+            'data'   => $scheduledTransaction->fresh()->load('occurrences'),
+        ]);
     }
 
-    /**
-     * Delete a scheduled transaction.
-     */
+    // ─── destroy ──────────────────────────────────────────────────────────────
+
     public function destroy(ScheduledTransaction $scheduledTransaction): JsonResponse
     {
         $this->authorizeOwner($scheduledTransaction);
@@ -244,9 +247,99 @@ class ScheduledTransactionController extends Controller
         return $this->noContentResponse();
     }
 
-    private function createOccurrence(ScheduledTransaction $transaction, string $date, bool $isPaid): array
+    // ─── togglePaidStatus ─────────────────────────────────────────────────────
+
+    public function togglePaidStatus(Request $request, ScheduledTransaction $scheduledTransaction): JsonResponse
     {
-        return ['id' => $transaction->id, 'title' => $transaction->title, 'amount' => $transaction->amount, 'type' => $transaction->type, 'category' => $transaction->category, 'date' => $date, 'is_paid' => $isPaid];
+        $this->authorizeOwner($scheduledTransaction);
+
+        $validator = Validator::make($request->all(), [
+            'date'    => 'required|date_format:Y-m-d',
+            'is_paid' => 'required|boolean',
+        ]);
+        if ($validator->fails()) {
+            return $this->validationErrorResponse($validator->errors());
+        }
+
+        $occurrence = $scheduledTransaction->occurrences()->updateOrCreate(
+            [
+                'scheduled_transaction_id' => $scheduledTransaction->id,
+                'due_date'                 => $validator->validated()['date'],
+            ],
+            ['is_paid' => $validator->validated()['is_paid']]
+        );
+
+        return $this->successResponse([
+            'status' => 'success',
+            'data'   => $occurrence,
+        ]);
+    }
+
+    // ─── helpers ──────────────────────────────────────────────────────────────
+
+    private function buildEvent(ScheduledTransaction $tx, string $date, bool $isPaid): array
+    {
+        return [
+            'id'       => $tx->id,
+            'title'    => $tx->title,
+            'amount'   => (float) $tx->amount,
+            'type'     => $tx->type,
+            'category' => $tx->category,
+            'date'     => $date,
+            'is_paid'  => $isPaid,
+            'color'    => $tx->type === 'income' ? 'green' : 'red',
+        ];
+    }
+
+    /**
+     * Fast-forward $current to the first occurrence >= $targetMonth,
+     * without iterating month by month from start_date.
+     */
+    private function fastForwardToMonth(ScheduledTransaction $tx, Carbon $current, Carbon $targetMonth): Carbon
+    {
+        $interval = max(1, (int) $tx->recurrence_interval);
+
+        switch ($tx->recurrence_type) {
+            case 'daily':
+                $days = (int) ceil($current->diffInDays($targetMonth, false));
+                if ($days > 0) {
+                    $steps = (int) ceil($days / $interval);
+                    $current->addDays($steps * $interval);
+                }
+                break;
+
+            case 'weekly':
+                $weeks = (int) ceil($current->diffInWeeks($targetMonth, false));
+                if ($weeks > 0) {
+                    $steps = (int) ceil($weeks / $interval);
+                    $current->addWeeks($steps * $interval);
+                }
+                break;
+
+            case 'monthly':
+                $months = (int) ceil($current->diffInMonths($targetMonth, false));
+                if ($months > 0) {
+                    $steps = (int) ceil($months / $interval);
+                    $current->addMonthsNoOverflow($steps * $interval);
+                }
+                // Step back one interval if we overshot
+                while ($current->greaterThan($targetMonth)) {
+                    $current->subMonthsNoOverflow($interval);
+                }
+                // Step forward until we are >= targetMonth
+                while ($current->lessThan($targetMonth)) {
+                    $current->addMonthsNoOverflow($interval);
+                }
+                break;
+
+            case 'yearly':
+                while ($current->lessThan($targetMonth)) {
+                    $current->addYearsNoOverflow($interval);
+                }
+                break;
+        }
+
+        return $current;
     }
 
     private function authorizeOwner(ScheduledTransaction $transaction): void

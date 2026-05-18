@@ -70,6 +70,8 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
         ->middleware('throttle:10,1');
 
     // 4. CALENDARIO & PROGRAMADOS
+    // getEvents MUST come before apiResource to avoid {scheduledTransaction} binding on "events"
+    Route::get('/scheduled-transactions/events', [ScheduledTransactionController::class, 'getEvents']);
     Route::apiResource('scheduled-transactions', ScheduledTransactionController::class);
     Route::post('/scheduled-transactions/{scheduledTransaction}/toggle-paid', [ScheduledTransactionController::class, 'togglePaidStatus']);
     Route::prefix('v1/calendar')->group(function () {
