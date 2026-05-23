@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Auth;
 
+use App\Helpers\SchemaCache;
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\User;
@@ -9,10 +10,10 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -21,6 +22,7 @@ class AuthController extends Controller
     use ApiResponse;
 
     private const PASSWORD_RESET_CODE_TTL_SECONDS = 30;
+
     private const PASSWORD_RESET_TOKEN_TTL_MINUTES = 10;
 
     /**
@@ -29,7 +31,7 @@ class AuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'phone'    => 'required|string|max:20',
+            'phone' => 'required|string|max:20',
             'password' => 'required|string',
         ]);
 
@@ -37,10 +39,11 @@ class AuthController extends Controller
             return $this->validationErrorResponse($validated->errors(), 'Datos de inicio de sesión inválidos');
         }
 
-        $throttleKey = 'login_attempt:' . Str::lower($request->input('phone'));
+        $throttleKey = 'login_attempt:'.Str::lower($request->input('phone'));
 
         if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
             $seconds = RateLimiter::availableIn($throttleKey);
+
             return $this->errorResponse("Cuenta bloqueada temporalmente. Intente en {$seconds} segundos.", 429);
         }
 
@@ -49,6 +52,7 @@ class AuthController extends Controller
 
             if (! $user || ! Hash::check($request->input('password'), $user->password)) {
                 RateLimiter::hit($throttleKey, 600);
+
                 return $this->errorResponse('Credenciales inválidas', 401);
             }
 
@@ -57,7 +61,8 @@ class AuthController extends Controller
 
             return $this->successResponse(['user' => $user, 'token' => $token], 'Inicio de sesión exitoso');
         } catch (\Exception $e) {
-            Log::error('Login error: ' . $e->getMessage());
+            Log::error('Login error: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -68,10 +73,10 @@ class AuthController extends Controller
     public function register(Request $request): JsonResponse
     {
         $validated = Validator::make($request->all(), [
-            'name'         => 'required|string|max:255',
-            'phone'        => 'required|string|max:20|unique:users,phone',
+            'name' => 'required|string|max:255',
+            'phone' => 'required|string|max:20|unique:users,phone',
             'country_code' => 'required|string|max:5',
-            'password'     => 'required|digits:4',
+            'password' => 'required|digits:4',
         ]);
 
         if ($validated->fails()) {
@@ -80,17 +85,18 @@ class AuthController extends Controller
 
         try {
             $user = User::create([
-                'name'         => $request->input('name'),
-                'phone'        => $request->input('phone'),
+                'name' => $request->input('name'),
+                'phone' => $request->input('phone'),
                 'country_code' => $request->input('country_code'),
-                'password'     => Hash::make($request->input('password')),
+                'password' => Hash::make($request->input('password')),
             ]);
 
             $token = $user->createToken('auth_token')->plainTextToken;
 
             return $this->createdResponse(['user' => $user, 'token' => $token], 'Usuario registrado exitosamente');
         } catch (\Exception $e) {
-            Log::error('Register error: ' . $e->getMessage());
+            Log::error('Register error: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -224,12 +230,12 @@ class AuthController extends Controller
 
     private function passwordResetCodeCacheKey(string $phone): string
     {
-        return 'password_reset_code:' . Str::lower($phone);
+        return 'password_reset_code:'.Str::lower($phone);
     }
 
     private function passwordResetTokenCacheKey(string $phone, string $token): string
     {
-        return 'password_reset_token:' . Str::lower($phone) . ':' . $token;
+        return 'password_reset_token:'.Str::lower($phone).':'.$token;
     }
 
     /**
@@ -240,35 +246,56 @@ class AuthController extends Controller
      */
     public function homeData(Request $request): JsonResponse
     {
-        $user  = $request->user();
+        $user = $request->user();
         $month = (int) $request->query('month', now('America/Bogota')->month);
-        $year  = (int) $request->query('year',  now('America/Bogota')->year);
+        $year = (int) $request->query('year', now('America/Bogota')->year);
+
+        // 2-minute cache per user+month+year.
+        // Invalidated by MovementController::invalidateUserSummaryCache() on every mutation.
+        $cacheKey = "home_data:{$user->id}:{$year}:{$month}";
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return response()->json($cached);
+        }
 
         // Build date range in Colombia timezone, then convert to UTC for DB queries
-        $tz    = 'America/Bogota';
+        $tz = 'America/Bogota';
         $start = Carbon::createFromDate($year, $month, 1, $tz)->startOfMonth()->utc();
-        $end   = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
+        $end = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
 
-        $incomes  = (float) ($user->movements()->where('type', 'income') ->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
-        $expenses = (float) ($user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->sum('amount') ?? 0.0);
+        // One consolidated query replaces 4 separate aggregate queries.
+        // Uses the compound index (user_id, type, created_at).
+        $aggRow = DB::selectOne(
+            'SELECT
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0)            AS total_income,
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0)            AS total_expense,
+                COUNT(CASE WHEN type = ? THEN 1 END)                                   AS expense_count,
+                COUNT(CASE WHEN type = ? AND has_invoice = 1 THEN 1 END)               AS invoice_count
+             FROM movements
+             WHERE user_id = ? AND created_at BETWEEN ? AND ?',
+            ['income', 'expense', 'expense', 'expense', $user->id, $start, $end]
+        );
 
-        $balance   = $incomes - $expenses;
+        $incomes = (float) ($aggRow->total_income ?? 0.0);
+        $expenses = (float) ($aggRow->total_expense ?? 0.0);
+
+        $balance = $incomes - $expenses;
         $flujoNeto = $balance;
 
         // ── Semáforo ──────────────────────────────────────────────────────────
         $statusLabel = 'Sin actividad';
         $statusColor = 'grey';
-        $iconType    = 'neutral';
+        $iconType = 'neutral';
 
         if ($incomes > 0 || $expenses > 0) {
             if ($balance >= 0) {
                 $statusLabel = 'Saldo a favor';
                 $statusColor = 'green';
-                $iconType    = 'up';
+                $iconType = 'up';
             } else {
                 $statusLabel = 'Sobregirado';
                 $statusColor = 'red';
-                $iconType    = 'down';
+                $iconType = 'down';
             }
         }
 
@@ -279,24 +306,24 @@ class AuthController extends Controller
         }
 
         // ── Reto de Ahorro Activo + Alcancía con Fuga ────────────────────────
-        $hasActiveChallenge    = false;
-        $ahorroReservadoMes    = 0.0;
+        $hasActiveChallenge = false;
+        $ahorroReservadoMes = 0.0;
         $ahorroProtegidoActual = 0.0;
-        $dineroFugadoMes       = 0.0;
-        $disponibleParaVivir   = $balance;
+        $dineroFugadoMes = 0.0;
+        $disponibleParaVivir = $balance;
 
-        if (Schema::hasColumn('users', 'has_active_challenge')) {
+        if (SchemaCache::hasColumn('users', 'has_active_challenge')) {
             $hasActiveChallenge = (bool) $user->has_active_challenge;
 
             if ($hasActiveChallenge && $user->savings_mode_pct > 0) {
                 $ahorroReservadoMes = round($incomes * (float) $user->savings_mode_pct, 2);
 
                 // challenge_savings_balance = monto real protegido tras fugas
-                $ahorroProtegidoActual = Schema::hasColumn('users', 'challenge_savings_balance')
+                $ahorroProtegidoActual = SchemaCache::hasColumn('users', 'challenge_savings_balance')
                     ? (float) ($user->challenge_savings_balance ?? $ahorroReservadoMes)
                     : $ahorroReservadoMes;
 
-                $dineroFugadoMes   = max(0.0, round($ahorroReservadoMes - $ahorroProtegidoActual, 2));
+                $dineroFugadoMes = max(0.0, round($ahorroReservadoMes - $ahorroProtegidoActual, 2));
                 $disponibleParaVivir = round($balance - $ahorroProtegidoActual, 2);
             }
         }
@@ -307,20 +334,20 @@ class AuthController extends Controller
         // Texto corto para mostrar en UI sin lógica en Flutter
         $saludTexto = match ($saludFinanciera['label']) {
             'Excelente', 'Muy Bueno' => 'Bolsillo sano',
-            'Bueno'                  => 'Puedes mejorar',
-            'Regular'                => 'Gasto elevado',
-            'Crítico'                => 'Finanzas en riesgo',
-            default                  => 'Sin movimientos',
+            'Bueno' => 'Puedes mejorar',
+            'Regular' => 'Gasto elevado',
+            'Crítico' => 'Finanzas en riesgo',
+            default => 'Sin movimientos',
         };
 
-        // ── Eficiencia Fiscal ─────────────────────────────────────────────────
-        $totalExpenseCount   = $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->count();
-        $expensesWithInvoice = $user->movements()->where('type', 'expense')->whereBetween('created_at', [$start, $end])->where('has_invoice', true)->count();
-        $eficienciaFiscal    = $totalExpenseCount > 0 ? round(($expensesWithInvoice / $totalExpenseCount) * 100, 1) : 0.0;
+        // ── Eficiencia Fiscal (valores ya calculados en la query consolidada) ────
+        $totalExpenseCount = (int) ($aggRow->expense_count ?? 0);
+        $expensesWithInvoice = (int) ($aggRow->invoice_count ?? 0);
+        $eficienciaFiscal = $totalExpenseCount > 0 ? round(($expensesWithInvoice / $totalExpenseCount) * 100, 1) : 0.0;
 
         // ── Categoría de mayor gasto (actual vs mes anterior) ─────────────────
         $prevStart = $start->copy()->subMonth()->startOfMonth();
-        $prevEnd   = $start->copy()->subMonth()->endOfMonth();
+        $prevEnd = $start->copy()->subMonth()->endOfMonth();
 
         $topTag = $user->movements()
             ->leftJoin('tags', 'movements.tag_id', '=', 'tags.id')
@@ -335,18 +362,18 @@ class AuthController extends Controller
 
         $alertaGasto = null;
         if ($topTag) {
-            $tagName      = (string) ($topTag->tag_name ?? '');
-            $currentTotal = (float)  ($topTag->total_amount ?? 0.0);
-            $prevTotal    = (float)  ($user->movements()
+            $tagName = (string) ($topTag->tag_name ?? '');
+            $currentTotal = (float) ($topTag->total_amount ?? 0.0);
+            $prevTotal = (float) ($user->movements()
                 ->where('type', 'expense')
                 ->whereBetween('created_at', [$prevStart, $prevEnd])
                 ->where('tag_id', $topTag->tag_id)
                 ->sum('amount') ?? 0.0);
             $alertaGasto = [
-                'categoria'       => $tagName,
-                'monto'           => round($currentTotal, 2),
+                'categoria' => $tagName,
+                'monto' => round($currentTotal, 2),
                 'excede_anterior' => $prevTotal > 0 && $currentTotal > $prevTotal,
-                'variacion_pct'   => $prevTotal > 0 ? round((($currentTotal - $prevTotal) / $prevTotal) * 100, 1) : null,
+                'variacion_pct' => $prevTotal > 0 ? round((($currentTotal - $prevTotal) / $prevTotal) * 100, 1) : null,
             ];
         }
 
@@ -358,44 +385,44 @@ class AuthController extends Controller
 
         // ── Objeto analisis_usuario (Flutter solo mapea, no calcula) ──────────
         $analisisUsuario = [
-            'health_score'        => $saludFinanciera['score'],
+            'health_score' => $saludFinanciera['score'],
             'mensaje_diagnostico' => $saludFinanciera['descripcion'],
-            'eficiencia_fiscal'   => $eficienciaFiscal,
-            'alerta_gasto'        => $alertaGasto,
-            'observaciones'       => $observaciones,
+            'eficiencia_fiscal' => $eficienciaFiscal,
+            'alerta_gasto' => $alertaGasto,
+            'observaciones' => $observaciones,
         ];
 
         // ── Objeto analisis (alias conciso para KPI cards en Flutter) ─────────
-        $nivelAhorro = match(true) {
+        $nivelAhorro = match (true) {
             $porcentajeAhorro >= 30 => 'Bestia',
             $porcentajeAhorro >= 10 => 'Moderado',
-            default                  => 'Bajo',
+            default => 'Bajo',
         };
-        $consejoIa = match(true) {
-            $balance < 0            => 'Recorta gastos no esenciales esta semana.',
+        $consejoIa = match (true) {
+            $balance < 0 => 'Recorta gastos no esenciales esta semana.',
             $porcentajeAhorro >= 30 => '¡Gran ritmo! Considera invertir tu excedente.',
-            $eficienciaFiscal < 40  => 'Pide factura en tus compras y deduce más.',
-            $hasActiveChallenge     => 'Tu reto de ahorro está activo. ¡No lo abandones!',
-            default                 => 'Mantén el registro de tus gastos diarios.',
+            $eficienciaFiscal < 40 => 'Pide factura en tus compras y deduce más.',
+            $hasActiveChallenge => 'Tu reto de ahorro está activo. ¡No lo abandones!',
+            default => 'Mantén el registro de tus gastos diarios.',
         };
         $analisis = [
-            'score'           => $saludFinanciera['score'],
-            'nivel_ahorro'    => $nivelAhorro,
+            'score' => $saludFinanciera['score'],
+            'nivel_ahorro' => $nivelAhorro,
             'facturacion_pct' => $eficienciaFiscal,
-            'consejo_ia'      => $consejoIa,
+            'consejo_ia' => $consejoIa,
         ];
 
         // ── Distribución de Saldo por Cuenta ─────────────────────────────────
         $distribucionSaldo = [];
         try {
-            if (Schema::hasTable('accounts')) {
+            if (SchemaCache::hasTable('accounts')) {
                 $distribucionSaldo = $user->accounts()
                     ->select('entidad', 'monto', 'tipo')
                     ->get()
-                    ->map(fn($a) => [
+                    ->map(fn ($a) => [
                         'entidad' => $a->entidad,
-                        'monto'   => (float) $a->monto,
-                        'tipo'    => $a->tipo,
+                        'monto' => (float) $a->monto,
+                        'tipo' => $a->tipo,
                     ])
                     ->values()
                     ->toArray();
@@ -404,27 +431,34 @@ class AuthController extends Controller
             // Tabla aún no migrada — devuelve lista vacía sin romper la respuesta
         }
 
-        return $this->successResponse([
-            'name'                    => $user->name ?? '',
-            'balance_total'           => (float) $balance,
-            'flujo_neto'              => (float) $flujoNeto,
-            'ahorro_reservado'        => (float) $ahorroReservadoMes,
-            'disponible_para_vivir'   => (float) $disponibleParaVivir,
-            'status_label'            => $statusLabel,
-            'status_color'            => $statusColor,
-            'icon_type'               => $iconType,
-            'ahorro_mes_pct'          => (float) $porcentajeAhorro,
-            'porcentaje_ahorro'       => (float) $porcentajeAhorro,
-            'salud_financiera'        => $saludFinanciera,
-            'salud_texto'             => $saludTexto,
-            'has_active_challenge'    => (bool)  $hasActiveChallenge,
-            'ahorro_reservado_mes'    => (float) $ahorroReservadoMes,
-            'ahorro_protegido_actual' => (float) $ahorroProtegidoActual,
-            'dinero_fugado_mes'       => (float) $dineroFugadoMes,
-            'analisis_usuario'        => $analisisUsuario,
-            'analisis'                => $analisis,
-            'distribucion_saldo'      => $distribucionSaldo,
-        ]);
+        $responsePayload = [
+            'status' => 'success',
+            'data' => [
+                'name' => $user->name ?? '',
+                'balance_total' => (float) $balance,
+                'flujo_neto' => (float) $flujoNeto,
+                'ahorro_reservado' => (float) $ahorroReservadoMes,
+                'disponible_para_vivir' => (float) $disponibleParaVivir,
+                'status_label' => $statusLabel,
+                'status_color' => $statusColor,
+                'icon_type' => $iconType,
+                'ahorro_mes_pct' => (float) $porcentajeAhorro,
+                'porcentaje_ahorro' => (float) $porcentajeAhorro,
+                'salud_financiera' => $saludFinanciera,
+                'salud_texto' => $saludTexto,
+                'has_active_challenge' => (bool) $hasActiveChallenge,
+                'ahorro_reservado_mes' => (float) $ahorroReservadoMes,
+                'ahorro_protegido_actual' => (float) $ahorroProtegidoActual,
+                'dinero_fugado_mes' => (float) $dineroFugadoMes,
+                'analisis_usuario' => $analisisUsuario,
+                'analisis' => $analisis,
+                'distribucion_saldo' => $distribucionSaldo,
+            ],
+        ];
+
+        Cache::put($cacheKey, $responsePayload, 120); // 2 minutes
+
+        return response()->json($responsePayload);
     }
 
     /**
@@ -432,23 +466,31 @@ class AuthController extends Controller
      */
     public function financialSummary(Request $request): JsonResponse
     {
-        $user  = $request->user();
-        $tz    = 'America/Bogota';
+        $user = $request->user();
+        $tz = 'America/Bogota';
         $month = (int) $request->query('month', now($tz)->month);
-        $year  = (int) $request->query('year',  now($tz)->year);
+        $year = (int) $request->query('year', now($tz)->year);
+
+        $cacheKey = "fin_summary:{$user->id}:{$year}:{$month}";
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return response()->json($cached);
+        }
 
         $start = Carbon::createFromDate($year, $month, 1, $tz)->startOfMonth()->utc();
-        $end   = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
+        $end = Carbon::createFromDate($year, $month, 1, $tz)->endOfMonth()->utc();
 
-        $totalIncome = (float) ($user->movements()
-            ->where('type', 'income')
-            ->whereBetween('created_at', [$start, $end])
-            ->sum('amount') ?? 0.0);
+        // Single query for income + expense sums
+        $agg = DB::selectOne(
+            'SELECT
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0) AS total_income,
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0) AS total_expense
+             FROM movements WHERE user_id = ? AND created_at BETWEEN ? AND ?',
+            ['income', 'expense', $user->id, $start, $end]
+        );
 
-        $totalExpense = (float) ($user->movements()
-            ->where('type', 'expense')
-            ->whereBetween('created_at', [$start, $end])
-            ->sum('amount') ?? 0.0);
+        $totalIncome = (float) ($agg->total_income ?? 0.0);
+        $totalExpense = (float) ($agg->total_expense ?? 0.0);
 
         $totalGoalContributions = 0.0;
         try {
@@ -469,17 +511,23 @@ class AuthController extends Controller
             ->orderByDesc('total_amount')
             ->limit(5)
             ->get()
-            ->mapWithKeys(function ($movement) {
-                $tagName = trim((string) ($movement->tag_name ?? ''));
-                return $tagName === '' ? [] : [$tagName => (float) $movement->total_amount];
-            });
+            ->mapWithKeys(fn ($m) => ($tag = trim((string) ($m->tag_name ?? ''))) !== ''
+                ? [$tag => (float) $m->total_amount]
+                : []);
 
-        return $this->successResponse([
-            'total_income'             => $totalIncome,
-            'total_expense'            => $totalExpense,
-            'total_goal_contributions' => $totalGoalContributions,
-            'top_tags'                 => $topTags,
-        ]);
+        $payload = [
+            'status' => 'success',
+            'data' => [
+                'total_income' => $totalIncome,
+                'total_expense' => $totalExpense,
+                'total_goal_contributions' => $totalGoalContributions,
+                'top_tags' => $topTags,
+            ],
+        ];
+
+        Cache::put($cacheKey, $payload, 120);
+
+        return response()->json($payload);
     }
 
     /**
@@ -489,16 +537,16 @@ class AuthController extends Controller
     {
         $user = $request->user();
 
-        $hasSavingsCol   = Schema::hasColumn('users', 'has_active_challenge');
-        $savingsPctCol   = Schema::hasColumn('users', 'savings_mode_pct');
+        $hasSavingsCol = SchemaCache::hasColumn('users', 'has_active_challenge');
+        $savingsPctCol = SchemaCache::hasColumn('users', 'savings_mode_pct');
 
         return $this->successResponse([
-            'id'                   => $user->id,
-            'name'                 => $user->name ?? '',
-            'phone'                => $user->phone ?? '',
-            'country_code'         => $user->country_code ?? '',
+            'id' => $user->id,
+            'name' => $user->name ?? '',
+            'phone' => $user->phone ?? '',
+            'country_code' => $user->country_code ?? '',
             'has_active_challenge' => $hasSavingsCol ? (bool) $user->has_active_challenge : false,
-            'savings_mode_pct'     => $savingsPctCol ? (float) ($user->savings_mode_pct ?? 0.0) : 0.0,
+            'savings_mode_pct' => $savingsPctCol ? (float) ($user->savings_mode_pct ?? 0.0) : 0.0,
         ], 'Perfil del usuario');
     }
 
@@ -518,9 +566,9 @@ class AuthController extends Controller
 
         if ($incomes > 0) {
             if ($ahorroMesPct >= 30) {
-                $obs[] = '💪 Ahorrando el ' . $ahorroMesPct . '% de tus ingresos. ¡Disciplina excelente!';
+                $obs[] = '💪 Ahorrando el '.$ahorroMesPct.'% de tus ingresos. ¡Disciplina excelente!';
             } elseif ($ahorroMesPct >= 10) {
-                $obs[] = '💡 Ahorro actual: ' . $ahorroMesPct . '%. Llevar al 20% marca la diferencia.';
+                $obs[] = '💡 Ahorro actual: '.$ahorroMesPct.'%. Llevar al 20% marca la diferencia.';
             } elseif ($balance < 0) {
                 $obs[] = '⚠️ Tus gastos superan tus ingresos. Revisa tus egresos prioritarios.';
             } else {
@@ -529,21 +577,21 @@ class AuthController extends Controller
         }
 
         if ($eficienciaFiscal >= 70) {
-            $obs[] = '🧾 El ' . $eficienciaFiscal . '% de tus gastos tienen factura. Buen control fiscal.';
+            $obs[] = '🧾 El '.$eficienciaFiscal.'% de tus gastos tienen factura. Buen control fiscal.';
         } elseif ($eficienciaFiscal > 0 && $eficienciaFiscal < 40) {
-            $obs[] = '🧾 Solo el ' . $eficienciaFiscal . '% con factura. Pide comprobante siempre.';
+            $obs[] = '🧾 Solo el '.$eficienciaFiscal.'% con factura. Pide comprobante siempre.';
         }
 
         if ($alertaGasto !== null) {
             if ($alertaGasto['excede_anterior'] === true && $alertaGasto['variacion_pct'] !== null) {
-                $obs[] = '📈 "' . $alertaGasto['categoria'] . '" subió un ' . abs((float) $alertaGasto['variacion_pct']) . '% vs el mes anterior.';
+                $obs[] = '📈 "'.$alertaGasto['categoria'].'" subió un '.abs((float) $alertaGasto['variacion_pct']).'% vs el mes anterior.';
             } else {
-                $obs[] = '📊 Mayor gasto del mes en "' . $alertaGasto['categoria'] . '".';
+                $obs[] = '📊 Mayor gasto del mes en "'.$alertaGasto['categoria'].'".';
             }
         }
 
         if ($hasActiveChallenge && $ahorroProtegido > 0) {
-            $obs[] = '🔒 Ahorro reservado de $' . number_format($ahorroProtegido, 0, '.', ',') . ' está protegido.';
+            $obs[] = '🔒 Ahorro reservado de $'.number_format($ahorroProtegido, 0, '.', ',').' está protegido.';
         }
 
         return array_slice($obs, 0, 3);
@@ -571,6 +619,7 @@ class AuthController extends Controller
         }
 
         $score = (int) max(20, round((1 - $ratio) * 100));
+
         return ['score' => $score, 'label' => 'Regular', 'descripcion' => 'Necesitas optimizar gastos', 'color' => 'orange'];
     }
 }

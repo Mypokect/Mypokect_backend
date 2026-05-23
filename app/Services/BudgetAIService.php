@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -58,6 +59,21 @@ class BudgetAIService
      */
     public function generateBudgetWithAI(string $title, float $amount, string $description, array $userTags = []): array
     {
+        if (GroqCircuitBreaker::isOpen()) {
+            Log::debug('BudgetAIService circuit breaker active — skipping AI generation');
+
+            return ['success' => false, 'message' => 'Servicio de IA temporalmente limitado. Intenta en un momento.'];
+        }
+
+        // Cache by hash of all inputs (tags included for per-user correctness).
+        // TTL 1h — shorter than voice commands since budget amounts change more often.
+        $cacheKey = 'budget_ai:'.md5($title.'|'.$amount.'|'.$description.'|'.implode(',', $userTags));
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            Log::info('generateBudgetWithAI: cache hit', ['key' => $cacheKey]);
+
+            return $cached;
+        }
         $language = $this->detectLanguage($title.' '.$description);
         $planType = $this->classifyPlanType($title.' '.$description);
 
@@ -216,7 +232,7 @@ class BudgetAIService
 
                         // Validate timing fields (defaults if AI omitted them)
                         $validPeriods = ['weekly', 'biweekly', 'monthly', 'custom'];
-                        if (!isset($content['suggested_period']) || !in_array($content['suggested_period'], $validPeriods)) {
+                        if (! isset($content['suggested_period']) || ! in_array($content['suggested_period'], $validPeriods)) {
                             $content['suggested_period'] = 'monthly';
                         }
                         $content['duration_days'] = isset($content['duration_days']) && is_numeric($content['duration_days'])
@@ -224,13 +240,21 @@ class BudgetAIService
                             : 30;
                         // =============================================
 
-                        return [
+                        $result = [
                             'success' => true,
                             'data' => $content,
                             'language' => $language,
                             'plan_type' => $planType,
                         ];
+                        Cache::put($cacheKey, $result, 3_600); // 1h TTL
+
+                        return $result;
                     }
+                } elseif ($response->status() === 429) {
+                    // Retrying the next model uses the same key and will also fail.
+                    GroqCircuitBreaker::trip((int) ($response->header('Retry-After') ?: 60));
+
+                    return ['success' => false, 'message' => 'Límite de consultas IA alcanzado. Intenta en un momento.'];
                 } else {
                     Log::error("AI API error ($model): ".$response->body());
                 }
@@ -261,18 +285,20 @@ class BudgetAIService
         $cleaned = trim($cleaned);
 
         $start = strpos($cleaned, '{');
-        $end   = strrpos($cleaned, '}');
+        $end = strrpos($cleaned, '}');
 
         if ($start !== false && $end !== false && $end > $start) {
             $jsonStr = substr($cleaned, $start, $end - $start + 1);
             $decoded = json_decode($jsonStr, true);
             if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
                 Log::warning('BudgetAIService: JSON extracted via markdown-strip fallback');
+
                 return $decoded;
             }
         }
 
         Log::error('BudgetAIService: safeJsonDecode failed', ['raw' => substr($content, 0, 200)]);
+
         return null;
     }
 
@@ -281,6 +307,21 @@ class BudgetAIService
      */
     public function interpretVoiceCommand(string $text): array
     {
+        if (GroqCircuitBreaker::isOpen()) {
+            Log::debug('BudgetAIService::interpretVoiceCommand circuit breaker active — using numeric fallback');
+            preg_match_all('/\d+/', $text, $matches);
+            $amount = isset($matches[0][0]) ? (float) $matches[0][0] : 0;
+
+            return ['name' => trim(str_replace((string) $amount, '', $text)), 'amount' => $amount];
+        }
+
+        // Cache by normalized input — this extraction is fully deterministic,
+        // no user context involved. TTL 24h.
+        $cacheKey = 'voice_cmd:'.md5(mb_strtolower(trim(preg_replace('/\s+/', ' ', $text))));
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return $cached;
+        }
         $prompt = <<<PROMPT
 ROL: Eres un parser de texto financiero en español latinoamericano. Tu única función es extraer el nombre y el monto de un gasto descrito en lenguaje natural.
 
@@ -335,8 +376,12 @@ PROMPT;
                 $content = $response['choices'][0]['message']['content'];
                 $decoded = $this->safeJsonDecode($content);
                 if ($decoded !== null) {
+                    Cache::put($cacheKey, $decoded, 86_400); // 24h TTL
+
                     return $decoded;
                 }
+            } elseif ($response->status() === 429) {
+                GroqCircuitBreaker::trip((int) ($response->header('Retry-After') ?: 60));
             }
         } catch (\Exception $e) {
             Log::error('Groq Voice Error: '.$e->getMessage());
@@ -347,7 +392,7 @@ PROMPT;
         $amount = isset($matches[0][0]) ? (float) $matches[0][0] : 0;
 
         return [
-            'name'   => trim(str_replace((string) $amount, '', $text)),
+            'name' => trim(str_replace((string) $amount, '', $text)),
             'amount' => $amount,
         ];
     }

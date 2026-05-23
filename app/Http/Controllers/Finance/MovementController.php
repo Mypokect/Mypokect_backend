@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Finance;
 
+use App\Helpers\SchemaCache;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Movement\CreateMovementRequest;
 use App\Http\Requests\Movement\VoiceSuggestionRequest;
@@ -11,14 +12,14 @@ use App\Models\Budget;
 use App\Models\Movement;
 use App\Models\Tag;
 use App\Services\MovementAIService;
+use Carbon\Carbon;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Schema;
 
 class MovementController extends Controller
 {
@@ -36,10 +37,10 @@ class MovementController extends Controller
      *
      * Returns all movements for the authenticated user, ordered by most recent, with their associated tag.
      */
-    public function index(\Illuminate\Http\Request $request): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         try {
-            $user    = Auth::user();
+            $user = Auth::user();
             $perPage = min((int) $request->query('per_page', 20), 100);
 
             Log::info("User {$user->id} is requesting movements list (per_page={$perPage}).");
@@ -50,20 +51,20 @@ class MovementController extends Controller
                 ->paginate($perPage);
 
             return $this->successResponse([
-                'data'       => MovementResource::collection($movements),
+                'data' => MovementResource::collection($movements),
                 'pagination' => [
                     'current_page' => $movements->currentPage(),
-                    'last_page'    => $movements->lastPage(),
-                    'per_page'     => $movements->perPage(),
-                    'total'        => $movements->total(),
-                    'has_more'     => $movements->hasMorePages(),
+                    'last_page' => $movements->lastPage(),
+                    'per_page' => $movements->perPage(),
+                    'total' => $movements->total(),
+                    'has_more' => $movements->hasMorePages(),
                 ],
             ]);
 
         } catch (\Exception $e) {
             Log::error('Error fetching movements: '.$e->getMessage());
 
-            return $this->errorResponse('Error al obtener movimientos: ' . $this->safeMessage($e));
+            return $this->errorResponse('Error al obtener movimientos: '.$this->safeMessage($e));
         }
     }
 
@@ -74,12 +75,20 @@ class MovementController extends Controller
      */
     public function store(CreateMovementRequest $request): JsonResponse
     {
+        // Inicializar $lock fuera del try para que el catch siempre pueda accederlo.
+        // Si $lock nunca se asigna (excepción antes de Cache::lock), el catch lo
+        // omite con seguridad gracias al check `if ($lock)`.
+        $lock = null;
+
         try {
             $user = Auth::user();
 
-            // Per-user rate lock: reject if last successful save was < 2 seconds ago
-            $lockKey = "movement_save_lock_{$user->id}";
-            if (Cache::has($lockKey)) {
+            // Atomic per-user lock — prevents race conditions from simultaneous taps.
+            // Cache::lock() is a test-and-set: the first caller acquires it; any
+            // concurrent request immediately gets false (non-blocking) and returns 429.
+            // TTL of 3 s acts as the cooldown window after a successful save.
+            $lock = Cache::lock("movement_save_{$user->id}", 3);
+            if (! $lock->get()) {
                 return $this->errorResponse('Demasiadas solicitudes. Espera un momento antes de registrar otro movimiento.', 429);
             }
 
@@ -91,6 +100,8 @@ class MovementController extends Controller
                 ->exists();
 
             if ($duplicate) {
+                $lock->release();
+
                 return $this->errorResponse('Registro duplicado detectado', 422);
             }
 
@@ -110,17 +121,17 @@ class MovementController extends Controller
 
             // Create movement
             $movement = Movement::create([
-                'type'                => $request->type,
-                'amount'              => $request->amount,
-                'description'         => $request->description ?? 'Movimiento',
-                'payment_method'      => $request->payment_method,
-                'has_invoice'         => $request->has_invoice ?? false,
+                'type' => $request->type,
+                'amount' => $request->amount,
+                'description' => $request->description ?? 'Movimiento',
+                'payment_method' => $request->payment_method,
+                'has_invoice' => $request->has_invoice ?? false,
                 'is_business_expense' => $request->is_business_expense ?? false,
-                'rent_type'           => $request->type === 'income' ? ($request->rent_type ?? null) : null,
-                'user_id'             => $user->id,
-                'tag_id'              => $tagId,
-                'is_digital'          => $request->input('is_digital', $request->payment_method === 'digital'),
-                'location_name'       => $request->input('location_name'),
+                'rent_type' => $request->type === 'income' ? ($request->rent_type ?? null) : null,
+                'user_id' => $user->id,
+                'tag_id' => $tagId,
+                'is_digital' => $request->input('is_digital', $request->payment_method === 'digital'),
+                'location_name' => $request->input('location_name'),
             ]);
 
             // Load tag relationship for response
@@ -128,36 +139,53 @@ class MovementController extends Controller
 
             DB::commit();
 
-            // Set per-user lock for 2 seconds after successful save
-            Cache::put($lockKey, true, now()->addSeconds(2));
+            // Invalidate home/summary caches so the next request reflects the new movement
+            $this->invalidateUserSummaryCache($user->id);
+
+            // Lock auto-expires (3s TTL set at acquisition = cooldown window).
+            // No manual release needed after a successful save.
 
             Log::info("Movement {$movement->id} created successfully by user {$user->id}", [
-                'rent_type'           => $movement->rent_type,
+                'rent_type' => $movement->rent_type,
                 'is_business_expense' => $movement->is_business_expense,
             ]);
 
-            // Post-commit side-effects in isolated try-catch so they never fail the response
+            // ── Side effects post-commit (presupuesto + alcancía) ──────────────
+            // Se ejecutan DESPUÉS del commit exitoso. Cualquier error aquí se
+            // registra en el log pero NO falla la respuesta: el movimiento ya
+            // fue guardado y el usuario debe recibir una respuesta de éxito.
             $budgetImpact = null;
-            $leakInfo     = null;
+            $leakInfo = null;
             try {
                 $budgetImpact = $this->computeBudgetImpact($user, $movement);
-                $leakInfo     = $this->applyLeakyBucket($user, $movement);
+                $leakInfo = $this->applyLeakyBucket($user, $movement);
                 $this->recalculateSavingsChallenge($user);
-            } catch (\Exception $sideEffectEx) {
-                Log::warning("Side-effect error after movement {$movement->id} created: " . $sideEffectEx->getMessage());
+            } catch (\Exception $sideEffectException) {
+                Log::error('Error en side effects post-guardado (el movimiento SÍ fue guardado)', [
+                    'movement_id' => $movement->id,
+                    'user_id' => $user->id,
+                    'error' => $sideEffectException->getMessage(),
+                    'file' => $sideEffectException->getFile(),
+                    'line' => $sideEffectException->getLine(),
+                ]);
             }
 
             return $this->createdResponse([
-                'movement'      => new MovementResource($movement),
+                'movement' => new MovementResource($movement),
                 'budget_impact' => $budgetImpact,
-                'leak_info'     => $leakInfo,
+                'leak_info' => $leakInfo,
             ], 'Movimiento creado');
 
         } catch (\Exception $e) {
             DB::rollBack();
+            // Liberar el lock solo si fue adquirido; si la excepción ocurrió
+            // antes de Cache::lock(), $lock es null y no hay nada que liberar.
+            if ($lock) {
+                $lock->release();
+            }
             Log::error('Error creating movement: '.$e->getMessage());
 
-            return $this->errorResponse('Error al crear movimiento: ' . $this->safeMessage($e));
+            return $this->errorResponse('Error al crear movimiento: '.$this->safeMessage($e));
         }
     }
 
@@ -167,32 +195,57 @@ class MovementController extends Controller
      * then writes the resulting protected balance back to the user record.
      * Called after every movement mutation (create, update, delete).
      */
+    /**
+     * Bust home-data and financial-summary caches for a user.
+     * Must be called after every movement mutation (create, update, delete)
+     * so the next homeData/financialSummary request returns fresh numbers.
+     */
+    private function invalidateUserSummaryCache(int $userId): void
+    {
+        // Delete up to 24 month-slots. We don't know which months are cached,
+        // so we wipe 3 months: last month, current month, next month.
+        $tz = 'America/Bogota';
+        foreach ([-1, 0, 1] as $offset) {
+            $dt = now($tz)->addMonths($offset);
+            Cache::forget("home_data:{$userId}:{$dt->year}:{$dt->month}");
+            Cache::forget("fin_summary:{$userId}:{$dt->year}:{$dt->month}");
+        }
+    }
+
     private function recalculateSavingsChallenge($user): void
     {
-        if (! Schema::hasColumn('users', 'challenge_savings_balance')) return;
-        if (! Schema::hasColumn('users', 'has_active_challenge')) return;
+        if (! SchemaCache::hasColumn('users', 'challenge_savings_balance')) {
+            return;
+        }
+        if (! SchemaCache::hasColumn('users', 'has_active_challenge')) {
+            return;
+        }
 
         $user->refresh();
 
-        if (! $user->has_active_challenge || $user->savings_mode_pct <= 0) return;
+        if (! $user->has_active_challenge || $user->savings_mode_pct <= 0) {
+            return;
+        }
 
-        $tz           = 'America/Bogota';
-        $now          = Carbon::now($tz);
+        $tz = 'America/Bogota';
+        $now = Carbon::now($tz);
         $startOfMonth = $now->copy()->startOfMonth()->utc()->toDateTimeString();
-        $endOfMonth   = $now->copy()->endOfMonth()->utc()->toDateTimeString();
+        $endOfMonth = $now->copy()->endOfMonth()->utc()->toDateTimeString();
 
         $incomesMes = (float) $user->movements()
             ->where('type', 'income')
             ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
             ->sum('amount');
 
-        if ($incomesMes <= 0) return;
+        if ($incomesMes <= 0) {
+            return;
+        }
 
-        $metaAhorro  = $incomesMes * (float) $user->savings_mode_pct;
+        $metaAhorro = $incomesMes * (float) $user->savings_mode_pct;
         $techoDiario = ($incomesMes - $metaAhorro) / 30;
 
         // Single query: group expenses by local date to respect Colombia midnight
-        $rows = \Illuminate\Support\Facades\DB::select(
+        $rows = DB::select(
             "SELECT DATE(CONVERT_TZ(created_at, '+00:00', '-05:00')) AS dia,
                     SUM(amount) AS total_dia
              FROM movements
@@ -223,7 +276,7 @@ class MovementController extends Controller
             return null;
         }
 
-        if (! Schema::hasColumn('users', 'challenge_savings_balance')) {
+        if (! SchemaCache::hasColumn('users', 'challenge_savings_balance')) {
             return null;
         }
 
@@ -233,11 +286,11 @@ class MovementController extends Controller
             return null;
         }
 
-        $now          = now();
+        $now = now();
         $startOfMonth = $now->copy()->startOfMonth();
-        $endOfMonth   = $now->copy()->endOfMonth();
-        $startOfDay   = $now->copy()->startOfDay();
-        $endOfDay     = $now->copy()->endOfDay();
+        $endOfMonth = $now->copy()->endOfMonth();
+        $startOfDay = $now->copy()->startOfDay();
+        $endOfDay = $now->copy()->endOfDay();
 
         $incomesMes = (float) $user->movements()
             ->where('type', 'income')
@@ -248,37 +301,37 @@ class MovementController extends Controller
             return null;
         }
 
-        $metaAhorro  = $incomesMes * (float) $user->savings_mode_pct;
+        $metaAhorro = $incomesMes * (float) $user->savings_mode_pct;
         $techoDiario = ($incomesMes - $metaAhorro) / 30;
 
         // Gastos totales de hoy (el nuevo movimiento ya está en DB tras commit)
-        $gastosHoy      = (float) $user->movements()
+        $gastosHoy = (float) $user->movements()
             ->where('type', 'expense')
             ->whereBetween('created_at', [$startOfDay, $endOfDay])
             ->sum('amount');
 
-        $gastosHoyAntes  = $gastosHoy - (float) $movement->amount;
+        $gastosHoyAntes = $gastosHoy - (float) $movement->amount;
 
-        $excesoAnterior  = max(0.0, $gastosHoyAntes - $techoDiario);
-        $excesoNuevo     = max(0.0, $gastosHoy - $techoDiario);
+        $excesoAnterior = max(0.0, $gastosHoyAntes - $techoDiario);
+        $excesoNuevo = max(0.0, $gastosHoy - $techoDiario);
         $fugaIncremental = round($excesoNuevo - $excesoAnterior, 2);
 
         if ($fugaIncremental <= 0) {
             return null;
         }
 
-        $saldoActual  = (float) $user->challenge_savings_balance;
-        $nuevoSaldo   = max(0.0, round($saldoActual - $fugaIncremental, 2));
+        $saldoActual = (float) $user->challenge_savings_balance;
+        $nuevoSaldo = max(0.0, round($saldoActual - $fugaIncremental, 2));
 
         $user->update(['challenge_savings_balance' => $nuevoSaldo]);
 
         Log::info("Leaky bucket user {$user->id}: fuga={$fugaIncremental}, balance {$saldoActual} -> {$nuevoSaldo}");
 
         return [
-            'fuga_aplicada'            => $fugaIncremental,
-            'techo_diario'             => round($techoDiario, 2),
-            'gastos_hoy'               => round($gastosHoy, 2),
-            'ahorro_protegido_actual'  => $nuevoSaldo,
+            'fuga_aplicada' => $fugaIncremental,
+            'techo_diario' => round($techoDiario, 2),
+            'gastos_hoy' => round($gastosHoy, 2),
+            'ahorro_protegido_actual' => $nuevoSaldo,
         ];
     }
 
@@ -315,7 +368,7 @@ class MovementController extends Controller
                 }
 
                 $from = $budget->date_from->format('Y-m-d').' 00:00:00';
-                $to   = $budget->date_to->format('Y-m-d').' 23:59:59';
+                $to = $budget->date_to->format('Y-m-d').' 23:59:59';
 
                 $spent = (float) Movement::where('user_id', $user->id)
                     ->where('type', 'expense')
@@ -324,23 +377,23 @@ class MovementController extends Controller
                     ->sum('amount');
 
                 $budgeted = (float) $category->amount;
-                $ratio    = $budgeted > 0 ? $spent / $budgeted : 0;
+                $ratio = $budgeted > 0 ? $spent / $budgeted : 0;
 
-                Log::info("Budget impact computed", [
+                Log::info('Budget impact computed', [
                     'budget_id' => $budget->id,
-                    'category'  => $category->name,
-                    'spent'     => $spent,
-                    'budgeted'  => $budgeted,
+                    'category' => $category->name,
+                    'spent' => $spent,
+                    'budgeted' => $budgeted,
                 ]);
 
                 return [
-                    'budget_id'           => $budget->id,
-                    'budget_title'        => $budget->title,
-                    'category'            => $category->name,
-                    'monto_gastado'       => round($spent, 2),
+                    'budget_id' => $budget->id,
+                    'budget_title' => $budget->title,
+                    'category' => $category->name,
+                    'monto_gastado' => round($spent, 2),
                     'monto_presupuestado' => $budgeted,
                     'porcentaje_progreso' => round($ratio * 100, 1),
-                    'estado_color'        => $ratio >= 1.0 ? 'red' : ($ratio >= 0.75 ? 'yellow' : 'green'),
+                    'estado_color' => $ratio >= 1.0 ? 'red' : ($ratio >= 0.75 ? 'yellow' : 'green'),
                 ];
             }
         }
@@ -373,18 +426,18 @@ class MovementController extends Controller
     public function update(Request $request, $id): JsonResponse
     {
         $request->validate([
-            'type'                => 'sometimes|required|in:income,expense',
-            'amount'              => 'sometimes|required|numeric|min:0.01',
-            'description'         => 'sometimes|nullable|string|max:255',
-            'payment_method'      => 'sometimes|nullable|in:cash,digital',
-            'tag_name'            => 'sometimes|nullable|string|max:100',
-            'has_invoice'         => 'sometimes|nullable|boolean',
+            'type' => 'sometimes|required|in:income,expense',
+            'amount' => 'sometimes|required|numeric|min:0.01',
+            'description' => 'sometimes|nullable|string|max:255',
+            'payment_method' => 'sometimes|nullable|in:cash,digital',
+            'tag_name' => 'sometimes|nullable|string|max:100',
+            'has_invoice' => 'sometimes|nullable|boolean',
             'is_business_expense' => 'sometimes|nullable|boolean',
-            'rent_type'           => 'sometimes|nullable|in:laboral,honorarios,capital,comercial,otros',
+            'rent_type' => 'sometimes|nullable|in:laboral,honorarios,capital,comercial,otros',
         ]);
 
         try {
-            $user     = Auth::user();
+            $user = Auth::user();
             $movement = Movement::where('user_id', $user->id)->findOrFail($id);
 
             DB::beginTransaction();
@@ -395,26 +448,28 @@ class MovementController extends Controller
                     $tagId = null;
                 } else {
                     $tagName = ucfirst(strtolower(trim($request->tag_name)));
-                    $tag     = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
-                    $tagId   = $tag->id;
+                    $tag = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+                    $tagId = $tag->id;
                 }
             }
 
             $newType = $request->input('type', $movement->type);
 
             $movement->update([
-                'type'                => $newType,
-                'amount'              => $request->input('amount', $movement->amount),
-                'description'         => $request->input('description', $movement->description),
-                'payment_method'      => $request->input('payment_method', $movement->payment_method),
-                'has_invoice'         => $request->input('has_invoice', $movement->has_invoice),
+                'type' => $newType,
+                'amount' => $request->input('amount', $movement->amount),
+                'description' => $request->input('description', $movement->description),
+                'payment_method' => $request->input('payment_method', $movement->payment_method),
+                'has_invoice' => $request->input('has_invoice', $movement->has_invoice),
                 'is_business_expense' => $request->input('is_business_expense', $movement->is_business_expense),
-                'rent_type'           => $newType === 'income' ? $request->input('rent_type', $movement->rent_type) : null,
-                'tag_id'              => $tagId,
+                'rent_type' => $newType === 'income' ? $request->input('rent_type', $movement->rent_type) : null,
+                'tag_id' => $tagId,
             ]);
 
             $movement->load('tag');
             DB::commit();
+
+            $this->invalidateUserSummaryCache($user->id);
 
             Log::info("Movement {$movement->id} updated by user {$user->id}");
 
@@ -423,20 +478,21 @@ class MovementController extends Controller
                 $budgetImpact = $this->computeBudgetImpact($user, $movement);
                 $this->recalculateSavingsChallenge($user);
             } catch (\Exception $sideEffectEx) {
-                Log::warning("Side-effect error after movement {$movement->id} updated: " . $sideEffectEx->getMessage());
+                Log::warning("Side-effect error after movement {$movement->id} updated: ".$sideEffectEx->getMessage());
             }
 
             return $this->successResponse([
-                'movement'      => new MovementResource($movement),
+                'movement' => new MovementResource($movement),
                 'budget_impact' => $budgetImpact,
             ], 'Movimiento actualizado');
 
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+        } catch (ModelNotFoundException) {
             return $this->errorResponse('Movimiento no encontrado', 404);
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Error updating movement: ' . $e->getMessage());
-            return $this->errorResponse('Error al actualizar movimiento: ' . $this->safeMessage($e));
+            Log::error('Error updating movement: '.$e->getMessage());
+
+            return $this->errorResponse('Error al actualizar movimiento: '.$this->safeMessage($e));
         }
     }
 
@@ -446,22 +502,24 @@ class MovementController extends Controller
     public function destroy($id): JsonResponse
     {
         try {
-            $user     = Auth::user();
+            $user = Auth::user();
             $movement = Movement::where('user_id', $user->id)->findOrFail($id);
 
             $movement->delete();
 
+            $this->invalidateUserSummaryCache($user->id);
             $this->recalculateSavingsChallenge($user);
 
             Log::info("Movement {$id} deleted by user {$user->id}");
 
             return $this->successResponse(null, 'Movimiento eliminado');
 
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+        } catch (ModelNotFoundException) {
             return $this->errorResponse('Movimiento no encontrado', 404);
         } catch (\Exception $e) {
-            Log::error('Error deleting movement: ' . $e->getMessage());
-            return $this->errorResponse('Error al eliminar movimiento: ' . $this->safeMessage($e));
+            Log::error('Error deleting movement: '.$e->getMessage());
+
+            return $this->errorResponse('Error al eliminar movimiento: '.$this->safeMessage($e));
         }
     }
 
@@ -586,8 +644,25 @@ class MovementController extends Controller
 
             Log::info('Voice suggestion generated successfully', ['suggestion' => $suggestion]);
 
-            if ($suggestion['error_type'] === 'insufficient_data') {
-                Log::warning("Voice suggestion insufficient_data for user {$user->id}: {$request->transcripcion}");
+            // ── Distinguir el tipo de error para dar respuestas claras ─────────
+            // 'rate_limited'    → Groq está saturado; el usuario no tiene la culpa.
+            //                     HTTP 429 para que el cliente muestre un toast
+            //                     diferente ("intenta en unos segundos").
+            // 'insufficient_data' → la IA no pudo extraer datos de la voz.
+            //                     HTTP 422 para que el cliente pida que el usuario
+            //                     reformule su mensaje.
+            if (($suggestion['error_type'] ?? null) === 'rate_limited') {
+                Log::warning("Voice suggestion bloqueada por rate limit para user {$user->id}");
+
+                return $this->errorResponse(
+                    'El servicio de IA está temporalmente ocupado. Espera unos segundos e intenta de nuevo.',
+                    429
+                );
+            }
+
+            if (($suggestion['error_type'] ?? null) === 'insufficient_data') {
+                Log::warning("Voice suggestion insufficient_data para user {$user->id}: {$request->transcripcion}");
+
                 return $this->errorResponse('No se pudo interpretar el comando de voz.', 422);
             }
 
@@ -596,7 +671,7 @@ class MovementController extends Controller
         } catch (\Exception $e) {
             Log::error('Error processing voice suggestion: '.$e->getMessage());
 
-            return $this->errorResponse('Error en proceso de IA: ' . $this->safeMessage($e));
+            return $this->errorResponse('Error en proceso de IA: '.$this->safeMessage($e));
         }
     }
 }

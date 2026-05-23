@@ -11,6 +11,7 @@ use App\Models\Tag;
 use App\Services\BudgetAIService;
 use App\Services\BudgetService;
 use App\Services\MovementAIService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -59,17 +60,45 @@ class BudgetController extends Controller
                 ->orderBy('created_at', 'desc')
                 ->get();
 
-            // ── Calcular gasto actual para cada presupuesto ─────────────────────
+            // ── Calcular gasto actual: batch query en vez de 1 query por presupuesto ──
+            // Collect all date ranges, pre-load all relevant movements once,
+            // then calculate totals in PHP — eliminates the N+1 pattern.
             $tz = 'America/Bogota';
-            $budgetsWithSpent = $budgets->map(function ($budget) use ($user, $tz) {
+
+            // Step 1: determine the union date range across all budgets with dates
+            $minFrom = null;
+            $maxTo = null;
+            foreach ($budgets as $b) {
+                if (! $b->date_from || ! $b->date_to) {
+                    continue;
+                }
+                $bFrom = Carbon::createFromFormat('Y-m-d', $b->date_from->format('Y-m-d'), $tz)->startOfDay()->utc();
+                $bTo = Carbon::createFromFormat('Y-m-d', $b->date_to->format('Y-m-d'), $tz)->endOfDay()->utc();
+                if ($minFrom === null || $bFrom->lt($minFrom)) {
+                    $minFrom = $bFrom;
+                }
+                if ($maxTo === null || $bTo->gt($maxTo)) {
+                    $maxTo = $bTo;
+                }
+            }
+
+            // Step 2: one query that loads all expense movements (with tag) in the union window
+            $allMovements = collect();
+            if ($minFrom && $maxTo) {
+                $allMovements = Movement::where('user_id', $user->id)
+                    ->where('type', 'expense')
+                    ->whereBetween('created_at', [$minFrom->toDateTimeString(), $maxTo->toDateTimeString()])
+                    ->with('tag:id,name')
+                    ->get(['id', 'amount', 'tag_id', 'created_at']);
+            }
+
+            // Step 3: filter in PHP per budget — zero extra DB queries
+            $budgetsWithSpent = $budgets->map(function ($budget) use ($tz, $allMovements) {
                 $totalSpent = 0;
 
                 if ($budget->date_from && $budget->date_to) {
-                    // Apply Colombia timezone so movements at night aren't misclassified
-                    $from = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)
-                        ->startOfDay()->utc()->toDateTimeString();
-                    $to   = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_to->format('Y-m-d'), $tz)
-                        ->endOfDay()->utc()->toDateTimeString();
+                    $from = Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)->startOfDay()->utc();
+                    $to = Carbon::createFromFormat('Y-m-d', $budget->date_to->format('Y-m-d'), $tz)->endOfDay()->utc();
 
                     $linkedTags = [];
                     foreach ($budget->categories as $category) {
@@ -80,32 +109,28 @@ class BudgetController extends Controller
                         }
                     }
 
-                    $baseQuery = Movement::where('user_id', $user->id)
-                        ->where('type', 'expense')
-                        ->whereBetween('created_at', [$from, $to]);
+                    $inWindow = $allMovements->filter(
+                        fn ($m) => $m->created_at->gte($from) && $m->created_at->lte($to)
+                    );
 
                     if (! empty($linkedTags)) {
-                        // Linked tags configured: count only tracked expenses
-                        $totalSpent = (clone $baseQuery)
-                            ->whereHas('tag', function ($q) use ($linkedTags) {
-                                $q->whereIn('name', $linkedTags);
-                            })
+                        $totalSpent = $inWindow
+                            ->filter(fn ($m) => $m->tag && in_array($m->tag->name, $linkedTags))
                             ->sum('amount');
                     } else {
-                        // No linked tags yet: fall back to ALL expenses in period
-                        $totalSpent = $baseQuery->sum('amount');
+                        $totalSpent = $inWindow->sum('amount');
                     }
                 }
 
-                $budgetArray  = $budget->toArray();
-                $totalAmount  = (float) ($budget->total_amount ?? 0);
+                $budgetArray = $budget->toArray();
+                $totalAmount = (float) ($budget->total_amount ?? 0);
                 $montoGastado = round((float) $totalSpent, 2);
                 $porcConsumido = $totalAmount > 0
                     ? min(1.0, round($montoGastado / $totalAmount, 4))
                     : 0.0;
 
-                $budgetArray['spent']               = $montoGastado; // backward compat
-                $budgetArray['monto_gastado']        = $montoGastado;
+                $budgetArray['spent'] = $montoGastado;
+                $budgetArray['monto_gastado'] = $montoGastado;
                 $budgetArray['porcentaje_consumido'] = $porcConsumido;
 
                 return $budgetArray;
@@ -320,6 +345,7 @@ class BudgetController extends Controller
             return $this->validationErrorResponse(null, $e->getMessage());
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error creating manual budget: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -445,6 +471,7 @@ class BudgetController extends Controller
             return $this->validationErrorResponse(null, $e->getMessage());
         } catch (\Exception $e) {
             Log::error('SmartBudget: Error saving AI budget: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -596,7 +623,7 @@ class BudgetController extends Controller
 
             return $this->successResponse($data);
         } catch (\Exception $e) {
-            Log::error('Error processing voice command: ' . $e->getMessage());
+            Log::error('Error processing voice command: '.$e->getMessage());
 
             return $this->errorResponse($this->safeMessage($e));
         }
@@ -619,14 +646,14 @@ class BudgetController extends Controller
 
             $validated = Validator::make($request->all(), [
                 'from' => 'nullable|date',
-                'to'   => 'nullable|date|after_or_equal:from',
+                'to' => 'nullable|date|after_or_equal:from',
             ]);
             if ($validated->fails()) {
                 return $this->validationErrorResponse($validated->errors());
             }
 
             $from = $request->input('from', $budget->date_from?->format('Y-m-d'));
-            $to   = $request->input('to', $budget->date_to?->format('Y-m-d'));
+            $to = $request->input('to', $budget->date_to?->format('Y-m-d'));
             if (! $from || ! $to) {
                 return $this->validationErrorResponse(null, 'Date range required: provide from/to params or set date_from/date_to on the budget.');
             }
@@ -637,8 +664,8 @@ class BudgetController extends Controller
 
             // ── PASO 1: Map tag → categorías + extraer keywords por categoría ──
             $tagToCatIndices = []; // tag => [idx, ...]
-            $catKeywords     = []; // idx => [keyword, ...]
-            $catNameWords    = []; // idx => [word, ...]
+            $catKeywords = []; // idx => [keyword, ...]
+            $catNameWords = []; // idx => [word, ...]
 
             foreach ($categories as $idx => $cat) {
                 $linkedData = $cat->linked_tags ?? [];
@@ -671,13 +698,13 @@ class BudgetController extends Controller
             }
 
             $allTags = array_keys($tagToCatIndices);
-            $tz     = 'America/Bogota';
-            $fromTs = \Carbon\Carbon::createFromFormat('Y-m-d', $from, $tz)->startOfDay()->utc()->toDateTimeString();
-            $toTs   = \Carbon\Carbon::createFromFormat('Y-m-d', $to, $tz)->endOfDay()->utc()->toDateTimeString();
+            $tz = 'America/Bogota';
+            $fromTs = Carbon::createFromFormat('Y-m-d', $from, $tz)->startOfDay()->utc()->toDateTimeString();
+            $toTs = Carbon::createFromFormat('Y-m-d', $to, $tz)->endOfDay()->utc()->toDateTimeString();
 
             // ── PASO 2: Una sola query para todos los movimientos ──
-            $totalSpent      = 0.0;
-            $spentPerCat     = array_fill(0, count($categories), 0.0);
+            $totalSpent = 0.0;
+            $spentPerCat = array_fill(0, count($categories), 0.0);
             $movementsPerCat = array_fill(0, count($categories), []);
 
             if (! empty($allTags)) {
@@ -692,7 +719,7 @@ class BudgetController extends Controller
                 // ── PASO 3: Asignar cada movimiento a UNA categoría ──
                 foreach ($movements as $mov) {
                     $tagName = $mov->tag?->name;
-                    $amount  = (float) $mov->amount;
+                    $amount = (float) $mov->amount;
                     $totalSpent += $amount;
 
                     if (! $tagName || ! isset($tagToCatIndices[$tagName])) {
@@ -715,11 +742,11 @@ class BudgetController extends Controller
 
                     $spentPerCat[$bestIdx] += $amount;
                     $movementsPerCat[$bestIdx][] = [
-                        'id'          => $mov->id,
-                        'amount'      => $amount,
+                        'id' => $mov->id,
+                        'amount' => $amount,
                         'description' => $mov->description,
-                        'tag'         => $tagName,
-                        'date'        => $mov->created_at->format('Y-m-d'),
+                        'tag' => $tagName,
+                        'date' => $mov->created_at->format('Y-m-d'),
                     ];
                 }
             } else {
@@ -733,12 +760,12 @@ class BudgetController extends Controller
                     ->get(['id', 'amount', 'tag_id', 'description', 'created_at']);
 
                 foreach ($movements as $mov) {
-                    $tagName     = mb_strtolower($mov->tag?->name ?? '');
+                    $tagName = mb_strtolower($mov->tag?->name ?? '');
                     $description = mb_strtolower($mov->description ?? '');
-                    $amount      = (float) $mov->amount;
+                    $amount = (float) $mov->amount;
 
                     // Intentar asignar a una categoría por similitud de nombre
-                    $bestIdx   = -1;
+                    $bestIdx = -1;
                     $bestScore = 0;
 
                     foreach ($categories as $idx => $cat) {
@@ -766,7 +793,7 @@ class BudgetController extends Controller
 
                         if ($score > $bestScore) {
                             $bestScore = $score;
-                            $bestIdx   = $idx;
+                            $bestIdx = $idx;
                         }
                     }
 
@@ -774,11 +801,11 @@ class BudgetController extends Controller
                         $totalSpent += $amount;
                         $spentPerCat[$bestIdx] += $amount;
                         $movementsPerCat[$bestIdx][] = [
-                            'id'          => $mov->id,
-                            'amount'      => $amount,
+                            'id' => $mov->id,
+                            'amount' => $amount,
                             'description' => $mov->description,
-                            'tag'         => $mov->tag?->name,
-                            'date'        => $mov->created_at->format('Y-m-d'),
+                            'tag' => $mov->tag?->name,
+                            'date' => $mov->created_at->format('Y-m-d'),
                         ];
                     }
                 }
@@ -795,7 +822,9 @@ class BudgetController extends Controller
 
                 foreach ($overrides as $movId => $targetCatName) {
                     $targetIdx = $catNameToIdx[$targetCatName] ?? null;
-                    if ($targetIdx === null) continue;
+                    if ($targetIdx === null) {
+                        continue;
+                    }
 
                     $movIdInt = (int) $movId;
 
@@ -826,29 +855,29 @@ class BudgetController extends Controller
             $totalSpent = array_sum($spentPerCat);
 
             foreach ($categories as $idx => $cat) {
-                $spent     = round($spentPerCat[$idx], 2);
-                $budgeted  = (float) $cat->amount;
+                $spent = round($spentPerCat[$idx], 2);
+                $budgeted = (float) $cat->amount;
                 $remaining = round($budgeted - $spent, 2);
-                $progress  = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
+                $progress = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
 
                 $categoriesData[] = [
-                    'name'                => $cat->name,
-                    'budgeted'            => $budgeted,
-                    'spent'               => $spent,
-                    'remaining'           => $remaining,
-                    'monto_gastado'       => $spent,
-                    'monto_restante'      => $remaining,
+                    'name' => $cat->name,
+                    'budgeted' => $budgeted,
+                    'spent' => $spent,
+                    'remaining' => $remaining,
+                    'monto_gastado' => $spent,
+                    'monto_restante' => $remaining,
                     'porcentaje_progreso' => $progress,
-                    'estado_color'        => $this->estadoColor($spent, $budgeted),
-                    'movements'           => $movementsPerCat[$idx],
+                    'estado_color' => $this->estadoColor($spent, $budgeted),
+                    'movements' => $movementsPerCat[$idx],
                 ];
             }
 
             return $this->successResponse([
-                'budget_id'          => $budget->id,
-                'total_budgeted'     => (float) $budget->total_amount,
-                'total_spent'        => round($totalSpent, 2),
-                'categories'         => $categoriesData,
+                'budget_id' => $budget->id,
+                'total_budgeted' => (float) $budget->total_amount,
+                'total_spent' => round($totalSpent, 2),
+                'categories' => $categoriesData,
             ]);
 
         } catch (\Exception $e) {
@@ -884,7 +913,7 @@ class BudgetController extends Controller
                     : "Categories total ($categoriesTotal) differs from budget total ({$budget->total_amount})",
             ]);
         } catch (\Exception $e) {
-            Log::error('Error validating budget: ' . $e->getMessage());
+            Log::error('Error validating budget: '.$e->getMessage());
 
             return $this->errorResponse($this->safeMessage($e));
         }
@@ -922,7 +951,7 @@ class BudgetController extends Controller
 
             return $this->successResponse($category);
         } catch (\Exception $e) {
-            Log::error('Error updating category: ' . $e->getMessage());
+            Log::error('Error updating category: '.$e->getMessage());
 
             return $this->errorResponse($this->safeMessage($e));
         }
@@ -948,7 +977,7 @@ class BudgetController extends Controller
 
             return $this->deletedResponse('Category deleted');
         } catch (\Exception $e) {
-            Log::error('Error deleting category: ' . $e->getMessage());
+            Log::error('Error deleting category: '.$e->getMessage());
 
             return $this->errorResponse($this->safeMessage($e));
         }
@@ -984,7 +1013,7 @@ class BudgetController extends Controller
             $from = $request->input('from', $budget->date_from?->format('Y-m-d'));
             $to = $request->input('to', $budget->date_to?->format('Y-m-d'));
 
-            if (!$from || !$to) {
+            if (! $from || ! $to) {
                 return $this->validationErrorResponse(null, 'Date range required: provide from/to params or set date_from/date_to on the budget.');
             }
 
@@ -1032,7 +1061,7 @@ class BudgetController extends Controller
 
             // ── PASO 3: Verificar caché (hash HIT) ───────────────────────────────
             if (
-                !$forceRefresh &&
+                ! $forceRefresh &&
                 $budget->suggested_tags_hash === $currentHash &&
                 $budget->suggested_tags_cache !== null
             ) {
@@ -1060,7 +1089,7 @@ class BudgetController extends Controller
             ]);
 
             // NUEVO ENFOQUE: Obtener movimientos individuales, no tags agregados
-            $movements = \App\Models\Movement::where('user_id', $userId)
+            $movements = Movement::where('user_id', $userId)
                 ->where('type', 'expense')
                 ->whereBetween('created_at', [$from.' 00:00:00', $to.' 23:59:59'])
                 ->with('tag')
@@ -1133,7 +1162,7 @@ class BudgetController extends Controller
                 'budget_id' => $budget->id,
                 'hash' => $currentHash,
                 'simple_tags' => $matchesSimple,
-                'with_keywords' => array_map(fn($d) => count($d['keywords'] ?? []), $matchesDetailed),
+                'with_keywords' => array_map(fn ($d) => count($d['keywords'] ?? []), $matchesDetailed),
             ]);
 
             return $this->successResponse(array_merge(
@@ -1175,6 +1204,7 @@ class BudgetController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Error clearing suggested tags cache: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -1195,7 +1225,7 @@ class BudgetController extends Controller
 
             $categoryTags = $request->input('category_tags', []);
 
-            if (empty($categoryTags) || !is_array($categoryTags)) {
+            if (empty($categoryTags) || ! is_array($categoryTags)) {
                 return $this->validationErrorResponse(null, 'category_tags is required and must be an object');
             }
 
@@ -1203,13 +1233,13 @@ class BudgetController extends Controller
             $updated = 0;
 
             foreach ($budget->categories as $category) {
-                if (!array_key_exists($category->name, $categoryTags)) {
+                if (! array_key_exists($category->name, $categoryTags)) {
                     continue;
                 }
 
                 $tagNames = $categoryTags[$category->name];
 
-                if (!is_array($tagNames)) {
+                if (! is_array($tagNames)) {
                     continue;
                 }
 
@@ -1220,6 +1250,7 @@ class BudgetController extends Controller
                         'linked_tags_since' => null,
                     ]);
                     $updated++;
+
                     continue;
                 }
 
@@ -1246,6 +1277,7 @@ class BudgetController extends Controller
 
         } catch (\Exception $e) {
             Log::error('Error applying AI tags: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -1263,9 +1295,9 @@ class BudgetController extends Controller
         }
 
         $request->validate([
-            'movement_ids'   => 'required|array|min:1',
+            'movement_ids' => 'required|array|min:1',
             'movement_ids.*' => 'integer|min:1',
-            'category_name'  => 'required|string|max:255',
+            'category_name' => 'required|string|max:255',
         ]);
 
         $category = $budget->categories()->where('name', $request->category_name)->first();
@@ -1274,7 +1306,7 @@ class BudgetController extends Controller
         }
 
         $tagNames = $this->extractTagNames($category->linked_tags ?? []);
-        $tagName  = ! empty($tagNames) ? $tagNames[0] : $request->category_name;
+        $tagName = ! empty($tagNames) ? $tagNames[0] : $request->category_name;
 
         $tag = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
 
@@ -1300,14 +1332,14 @@ class BudgetController extends Controller
             $user = Auth::user();
 
             $validated = Validator::make($request->all(), [
-                'movement_id'      => 'required|integer|min:1',
+                'movement_id' => 'required|integer|min:1',
                 'target_budget_id' => 'required|integer|min:1',
             ]);
             if ($validated->fails()) {
                 return $this->validationErrorResponse($validated->errors());
             }
 
-            $movId    = (int) $request->input('movement_id');
+            $movId = (int) $request->input('movement_id');
             $targetId = (int) $request->input('target_budget_id');
 
             $targetBudget = Budget::where('id', $targetId)
@@ -1333,7 +1365,7 @@ class BudgetController extends Controller
                 $tagName = $targetBudget->title;
             }
 
-            $tag     = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+            $tag = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
             $updated = Movement::where('user_id', $user->id)
                 ->where('id', $movId)
                 ->update(['tag_id' => $tag->id]);
@@ -1348,7 +1380,8 @@ class BudgetController extends Controller
             );
 
         } catch (\Exception $e) {
-            Log::error('Error reassigning movement: ' . $e->getMessage());
+            Log::error('Error reassigning movement: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }
@@ -1358,10 +1391,17 @@ class BudgetController extends Controller
      */
     private function estadoColor(float $spent, float $budgeted): string
     {
-        if ($budgeted <= 0) return 'green';
+        if ($budgeted <= 0) {
+            return 'green';
+        }
         $ratio = $spent / $budgeted;
-        if ($ratio >= 1.0) return 'red';
-        if ($ratio >= 0.75) return 'yellow';
+        if ($ratio >= 1.0) {
+            return 'red';
+        }
+        if ($ratio >= 0.75) {
+            return 'yellow';
+        }
+
         return 'green';
     }
 
@@ -1377,18 +1417,19 @@ class BudgetController extends Controller
         if (! $budget->date_from) {
             return array_map(function ($cat) {
                 $data = $cat->toArray();
-                $data['monto_gastado']       = 0.0;
-                $data['monto_restante']      = (float) $cat->amount;
+                $data['monto_gastado'] = 0.0;
+                $data['monto_restante'] = (float) $cat->amount;
                 $data['porcentaje_progreso'] = 0.0;
-                $data['estado_color']        = 'green';
+                $data['estado_color'] = 'green';
+
                 return $data;
             }, $categories);
         }
 
-        $tz          = 'America/Bogota';
+        $tz = 'America/Bogota';
         $effectiveTo = min($budget->date_to ?? now(), now());
-        $from        = \Carbon\Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)->startOfDay()->utc()->toDateTimeString();
-        $to          = \Carbon\Carbon::createFromFormat('Y-m-d', $effectiveTo->format('Y-m-d'), $tz)->endOfDay()->utc()->toDateTimeString();
+        $from = Carbon::createFromFormat('Y-m-d', $budget->date_from->format('Y-m-d'), $tz)->startOfDay()->utc()->toDateTimeString();
+        $to = Carbon::createFromFormat('Y-m-d', $effectiveTo->format('Y-m-d'), $tz)->endOfDay()->utc()->toDateTimeString();
         $userId = $budget->user_id;
 
         // Build tag → first category index map (simple, no keyword disambiguation)
@@ -1420,16 +1461,17 @@ class BudgetController extends Controller
         }
 
         return array_map(function ($cat, $idx) use ($spentPerCat) {
-            $spent     = round($spentPerCat[$idx], 2);
-            $budgeted  = (float) $cat->amount;
+            $spent = round($spentPerCat[$idx], 2);
+            $budgeted = (float) $cat->amount;
             $remaining = round($budgeted - $spent, 2);
-            $progress  = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
+            $progress = $budgeted > 0 ? round(min($spent / $budgeted, 1.0), 4) : 0.0;
 
             $data = $cat->toArray();
-            $data['monto_gastado']       = $spent;
-            $data['monto_restante']      = $remaining;
+            $data['monto_gastado'] = $spent;
+            $data['monto_restante'] = $remaining;
             $data['porcentaje_progreso'] = $progress;
-            $data['estado_color']        = $this->estadoColor($spent, $budgeted);
+            $data['estado_color'] = $this->estadoColor($spent, $budgeted);
+
             return $data;
         }, $categories, array_keys($categories));
     }
@@ -1479,7 +1521,7 @@ class BudgetController extends Controller
             return -1;
         }
 
-        $bestIdx   = $catIndices[0]; // Fallback: primera categoría (evita spending leak)
+        $bestIdx = $catIndices[0]; // Fallback: primera categoría (evita spending leak)
         $bestScore = 0;
 
         foreach ($catIndices as $idx) {
@@ -1505,7 +1547,7 @@ class BudgetController extends Controller
 
             if ($score > $bestScore) {
                 $bestScore = $score;
-                $bestIdx   = $idx;
+                $bestIdx = $idx;
             }
         }
 
@@ -1559,6 +1601,7 @@ class BudgetController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Error moving movement: '.$e->getMessage());
+
             return $this->errorResponse($this->safeMessage($e));
         }
     }

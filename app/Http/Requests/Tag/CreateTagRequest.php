@@ -19,6 +19,24 @@ class CreateTagRequest extends FormRequest
     }
 
     /**
+     * Normaliza el nombre ANTES de la validación para que el unique check
+     * trabaje con el mismo valor que usará el controlador.
+     *
+     * Bug original: el usuario enviaba "comida" (lowercase), el unique check
+     * lo comparaba contra "Comida" en la DB y la rechazaba aunque el
+     * controlador la hubiera normalizado igual. Ahora el name llega normalizado
+     * tanto al validador como al controlador.
+     */
+    protected function prepareForValidation(): void
+    {
+        if ($this->has('name')) {
+            $this->merge([
+                'name' => ucfirst(mb_strtolower(trim($this->name))),
+            ]);
+        }
+    }
+
+    /**
      * Get the validation rules that apply to the request.
      *
      * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
@@ -30,6 +48,8 @@ class CreateTagRequest extends FormRequest
                 'required',
                 'string',
                 'max:50',
+                // El unique check ya opera sobre el nombre normalizado (ucfirst+strtolower)
+                // gracias a prepareForValidation(), evitando falsos positivos por diferencias de case.
                 Rule::unique('tags', 'name')->where(function ($query) {
                     return $query->where('user_id', Auth::id());
                 }),
@@ -46,9 +66,9 @@ class CreateTagRequest extends FormRequest
     {
         return [
             'name.required' => 'El nombre de la etiqueta es requerido',
-            'name.string' => 'El nombre debe ser texto',
-            'name.max' => 'El nombre no puede exceder 50 caracteres',
-            'name.unique' => 'Ya tienes una etiqueta con este nombre',
+            'name.string'   => 'El nombre debe ser texto',
+            'name.max'      => 'El nombre no puede exceder 50 caracteres',
+            'name.unique'   => 'Ya tienes una etiqueta con este nombre',
         ];
     }
 

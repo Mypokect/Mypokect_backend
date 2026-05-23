@@ -33,21 +33,30 @@ class MovementAIService
         Log::info('User ID', ['user_id' => $user->id]);
         Log::info('Transcription', ['text' => substr($transcription, 0, 100).'...']);
 
+        // ── Circuit breaker: salir rápido si Groq está rate-limited ──────────
+        // Retorna 'rate_limited' para que el controlador pueda devolver 429
+        // en vez del engañoso 422 "No se pudo interpretar el comando de voz".
+        if (GroqCircuitBreaker::isOpen()) {
+            Log::warning('suggestFromVoice bloqueado — Groq circuit breaker activo (rate limited)', [
+                'user_id' => $user->id,
+            ]);
+
+            return $this->rateLimitedResponse();
+        }
+
         try {
-            $existingTags = Tag::where('user_id', $user->id)->pluck('name')->toArray();
-            $savingGoals  = SavingGoal::where('user_id', $user->id)->pluck('name')->toArray();
-
-            Log::info('Context loaded', ['tags' => count($existingTags), 'goals' => count($savingGoals)]);
-
             // ── Layers 1–3: Cache → Rule engine → Short LLM (<80 tokens) ─────
+            // DB queries are deferred: Tags and Goals are only loaded if we reach
+            // Layer 4 (full LLM), which is the rare path. Layers 1–3 resolve
+            // without user-specific context (cache hit, rules, or mini-LLM).
             /** @var HybridTransactionParser $parser */
             $parser = app(HybridTransactionParser::class);
-            $hybrid = $parser->parse($transcription, $existingTags, $savingGoals);
+            $hybrid = $parser->parse($transcription, [], []);
 
             Log::info('HybridParser result', [
-                '_source'    => $hybrid['_source'],
-                'amount'     => $hybrid['amount'],
-                'type'       => $hybrid['type'],
+                '_source' => $hybrid['_source'],
+                'amount' => $hybrid['amount'],
+                'type' => $hybrid['type'],
                 'error_type' => $hybrid['error_type'],
             ]);
 
@@ -56,17 +65,23 @@ class MovementAIService
                 Log::info('=== SUGGEST FROM VOICE COMPLETED (hybrid) ===', [
                     'source' => $hybrid['_source'],
                     'amount' => $result['amount'],
-                    'type'   => $result['type'],
+                    'type' => $result['type'],
                 ]);
+
                 return $result;
             }
 
             // ── Layer 4: Full LLM (only when hybrid completely failed) ────────
+            // Load user context here — DB queries only on this rare path.
             Log::info('Hybrid rules_partial — falling back to full LLM prompt');
 
-            $tagsList  = empty($existingTags) ? 'None' : implode(', ', $existingTags);
-            $goalsList = empty($savingGoals)  ? 'None' : implode(', ', $savingGoals);
-            $prompt    = $this->buildVoiceMovementPrompt($transcription, $tagsList, $goalsList);
+            $existingTags = Tag::where('user_id', $user->id)->pluck('name')->toArray();
+            $savingGoals = SavingGoal::where('user_id', $user->id)->pluck('name')->toArray();
+            Log::info('Context loaded for LLM fallback', ['tags' => count($existingTags), 'goals' => count($savingGoals)]);
+
+            $tagsList = empty($existingTags) ? 'None' : implode(', ', $existingTags);
+            $goalsList = empty($savingGoals) ? 'None' : implode(', ', $savingGoals);
+            $prompt = $this->buildVoiceMovementPrompt($transcription, $tagsList, $goalsList);
 
             $response = $this->callGroqAPI($prompt, 0.1, null, true);
 
@@ -81,6 +96,7 @@ class MovementAIService
                 }
                 Log::error('Full LLM also failed — returning insufficient_data');
                 Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => null, 'outcome' => 'all_failed']);
+
                 return $this->insufficientDataResponse();
             }
 
@@ -89,7 +105,7 @@ class MovementAIService
             $result = $this->normalizeMovementSuggestion($response);
             Log::info('=== SUGGEST FROM VOICE COMPLETED (full LLM) ===', [
                 'amount' => $result['amount'],
-                'type'   => $result['type'],
+                'type' => $result['type'],
             ]);
 
             return $result;
@@ -97,43 +113,68 @@ class MovementAIService
         } catch (\Exception $e) {
             Log::error('ERROR in suggestFromVoice — returning insufficient_data', [
                 'error' => $e->getMessage(),
-                'file'  => $e->getFile(),
-                'line'  => $e->getLine(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
             ]);
+
             return $this->insufficientDataResponse();
         }
     }
 
     /**
      * Suggest tag based on description and amount using AI.
+     *
+     * Nunca lanza excepciones: cualquier error retorna un tag de fallback del engine.
+     * Esto garantiza que el endpoint de sugerencia siempre responde exitosamente.
      */
     public function suggestTag(string $description, float $amount, User $user): string
     {
         try {
-            // Fast-path: deterministic mapping before calling LLM (zero token cost)
+            // ── Circuit breaker: salir rápido si Groq está rate-limited ──────
+            // En este caso el engine de reglas ya resuelve la mayoría de casos,
+            // así que el LLM solo es necesario para casos ambiguos.
+            if (GroqCircuitBreaker::isOpen()) {
+                Log::info('suggestTag: circuit breaker activo — usando solo engine de reglas');
+                $fallback = FinancialMappingEngine::mapToCategory($description);
+
+                return $fallback ?? FinancialMappingEngine::enrichTag($description, 'General');
+            }
+
+            // Fast-path: deterministic mapping before calling LLM (zero token cost).
+            // DB query is deferred: only run if the engine matched (to prefer a user
+            // tag name) or if the engine missed (to build the LLM prompt).
             $engineCategory = FinancialMappingEngine::mapToCategory($description);
 
+            if ($engineCategory !== null) {
+                // Engine matched — query DB only to check if the user has a tag whose
+                // name resembles the canonical category (e.g. "Comida" vs "Alimentos").
+                $existingTags = Tag::where('user_id', $user->id)
+                    ->withCount('movements')
+                    ->orderBy('movements_count', 'desc')
+                    ->pluck('name')
+                    ->toArray();
+
+                foreach ($existingTags as $tag) {
+                    if (mb_stripos($tag, $engineCategory) !== false || mb_stripos($engineCategory, $tag) !== false) {
+                        Log::info('suggestTag: engine fast-path matched user tag', ['tag' => $tag]);
+
+                        return $tag;
+                    }
+                }
+                Log::info('suggestTag: engine fast-path returned canonical category', ['category' => $engineCategory]);
+
+                return $engineCategory;
+            }
+
+            // LLM path — engine had no match; load tags for prompt context.
             $existingTags = Tag::where('user_id', $user->id)
                 ->withCount('movements')
                 ->orderBy('movements_count', 'desc')
                 ->pluck('name')
                 ->toArray();
 
-            if ($engineCategory !== null) {
-                // Prefer a matching user tag over the canonical category name
-                foreach ($existingTags as $tag) {
-                    if (mb_stripos($tag, $engineCategory) !== false || mb_stripos($engineCategory, $tag) !== false) {
-                        Log::info('suggestTag: engine fast-path matched user tag', ['tag' => $tag]);
-                        return $tag;
-                    }
-                }
-                Log::info('suggestTag: engine fast-path returned canonical category', ['category' => $engineCategory]);
-                return $engineCategory;
-            }
-
-            // LLM path — only reached when engine has no match
             $language = $this->detectLanguage($description, $existingTags);
-            $prompt   = $this->buildTagPrompt($description, $amount, $existingTags, $language);
+            $prompt = $this->buildTagPrompt($description, $amount, $existingTags, $language);
             $response = $this->callGroqAPI($prompt, 0.1, 15);
 
             if (! $response) {
@@ -170,8 +211,8 @@ class MovementAIService
             $clean = trim(preg_replace('/\s+/', ' ', $clean));
 
             // Strategy 3: Extract last meaningful word
-            $fillerWords = ['the','a','an','is','as','for','el','la','los','las','un','una','unos','unas','es','y','o','or','and'];
-            $words   = explode(' ', $clean);
+            $fillerWords = ['the', 'a', 'an', 'is', 'as', 'for', 'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'es', 'y', 'o', 'or', 'and'];
+            $words = explode(' ', $clean);
             $lastWord = trim(end($words) ?? '');
             $lastWord = preg_replace('/[^a-zñáéíóúA-ZÑÁÉÍÓÚ0-9]/i', '', $lastWord);
             if (in_array(mb_strtolower($lastWord), $fillerWords)) {
@@ -185,10 +226,19 @@ class MovementAIService
             }
 
             $finalTag = ucfirst(mb_strtolower(trim($lastWord)));
+
             return $finalTag ?: FinancialMappingEngine::enrichTag($description, 'General');
 
         } catch (\Exception $e) {
-            Log::error('suggestTag error', ['error' => $e->getMessage()]);
+            // NO re-lanzar la excepción: el endpoint de sugerencia debe siempre
+            // responder con algo útil. Si hay un error inesperado (DB, regex, etc.),
+            // se registra y se retorna un tag del engine como fallback.
+            Log::error('suggestTag error — retornando fallback del engine', [
+                'error' => $e->getMessage(),
+                'file'  => $e->getFile(),
+                'line'  => $e->getLine(),
+            ]);
+
             return FinancialMappingEngine::enrichTag($description, 'General');
         }
     }
@@ -397,7 +447,7 @@ PROMPT;
     protected function buildTagPrompt(string $description, float $amount, array $existingTags, string $language): string
     {
         $tagsLine = empty($existingTags) ? 'none' : implode(', ', $existingTags);
-        $lang     = $language === 'es' ? 'Spanish' : 'English';
+        $lang = $language === 'es' ? 'Spanish' : 'English';
 
         $prompt = <<<PROMPT
 You are a financial transaction categorizer.
@@ -425,9 +475,19 @@ PROMPT;
 
     /**
      * Call Groq API with fallback to multiple models.
+     *
+     * Circuit breaker: if Groq returned 429 recently, the call is skipped
+     * immediately to avoid burning more quota while the limit resets.
      */
     protected function callGroqAPI(string $prompt, float $temperature = 0.1, ?int $maxTokens = null, bool $useJsonMode = false): ?string
     {
+        // ── Circuit breaker: skip if we're within a rate-limit window ────────
+        if (GroqCircuitBreaker::isOpen()) {
+            Log::debug('Groq circuit breaker active — skipping API call');
+
+            return null;
+        }
+
         Log::debug('=== CALL GROQ API ===');
         Log::debug('Parameters', [
             'temperature' => $temperature,
@@ -481,6 +541,13 @@ PROMPT;
                     }
 
                     Log::warning("Model $model returned empty content");
+
+                } elseif ($response->status() === 429) {
+                    // Retrying another model with the same API key would also fail.
+                    GroqCircuitBreaker::trip((int) ($response->header('Retry-After') ?: 60));
+
+                    return null; // stop — other models share the same quota
+
                 } else {
                     Log::warning("Model $model returned unsuccessful status", [
                         'model' => $model,
@@ -534,6 +601,7 @@ PROMPT;
 
             if (! $data || ! is_array($data)) {
                 Log::error('Invalid AI JSON response after all attempts — returning insufficient_data');
+
                 return $this->insufficientDataResponse();
             }
 
@@ -549,29 +617,31 @@ PROMPT;
             // If AI explicitly flagged insufficient data, return the error struct
             if (isset($data['error_type']) && $data['error_type'] === 'insufficient_data') {
                 Log::warning('AI returned error_type=insufficient_data', ['raw' => substr($rawResponse, 0, 200)]);
+
                 return $this->insufficientDataResponse();
             }
 
-            // Also treat zero-amount + empty description as insufficient
-            $parsedAmount = (float) ($data['amount'] ?? 0);
+            // Reject negative or zero amounts
+            $parsedAmount = max(0.0, (float) ($data['amount'] ?? 0));
             $parsedDescription = trim($data['description'] ?? '');
-            if ($parsedAmount === 0.0 && $parsedDescription === '') {
-                Log::warning('AI returned zero amount and empty description — insufficient_data');
+            if ($parsedAmount <= 0.0) {
+                Log::warning('AI returned zero/negative amount — insufficient_data', ['amount' => $data['amount'] ?? null]);
+
                 return $this->insufficientDataResponse();
             }
 
             $suggestedTag = $this->normalizeTag($data);
             $result = [
-                'description'        => $parsedDescription ?: 'Movimiento',
-                'amount'             => $parsedAmount,
-                'suggested_tag'      => $suggestedTag,
-                'type'               => $type,
-                'payment_method'     => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
-                'has_invoice'        => (bool) ($data['has_invoice'] ?? false),
-                'is_business_expense'=> (bool) ($data['is_business_expense'] ?? false),
-                'rent_type'          => $rentType,
-                'is_goal'            => str_starts_with($suggestedTag, 'Meta:'),
-                'error_type'         => null,
+                'description' => $parsedDescription ?: 'Movimiento',
+                'amount' => $parsedAmount,
+                'suggested_tag' => $suggestedTag,
+                'type' => $type,
+                'payment_method' => in_array($data['payment_method'] ?? '', ['cash', 'digital']) ? $data['payment_method'] : 'digital',
+                'has_invoice' => (bool) ($data['has_invoice'] ?? false),
+                'is_business_expense' => (bool) ($data['is_business_expense'] ?? false),
+                'rent_type' => $rentType,
+                'is_goal' => str_starts_with($suggestedTag, 'Meta:'),
+                'error_type' => null,
             ];
 
             Log::debug('Normalization completed', [
@@ -593,6 +663,7 @@ PROMPT;
                 'file' => $e->getFile(),
                 'line' => $e->getLine(),
             ]);
+
             return $this->insufficientDataResponse();
         }
     }
@@ -604,16 +675,38 @@ PROMPT;
     private function insufficientDataResponse(): array
     {
         return [
-            'description'         => '',
-            'amount'              => 0,
-            'suggested_tag'       => '',
-            'type'                => 'expense',
-            'payment_method'      => 'digital',
-            'has_invoice'         => false,
+            'description' => '',
+            'amount' => 0,
+            'suggested_tag' => '',
+            'type' => 'expense',
+            'payment_method' => 'digital',
+            'has_invoice' => false,
             'is_business_expense' => false,
-            'rent_type'           => null,
-            'is_goal'             => false,
-            'error_type'          => 'insufficient_data',
+            'rent_type' => null,
+            'is_goal' => false,
+            'error_type' => 'insufficient_data',
+        ];
+    }
+
+    /**
+     * Returns a "rate limited" response struct.
+     * Used when the Groq circuit breaker is open (API rate-limit in effect).
+     * Allows the controller to return HTTP 429 with a clear message instead of
+     * the misleading 422 "No se pudo interpretar el comando de voz".
+     */
+    private function rateLimitedResponse(): array
+    {
+        return [
+            'description' => '',
+            'amount' => 0,
+            'suggested_tag' => '',
+            'type' => 'expense',
+            'payment_method' => 'digital',
+            'has_invoice' => false,
+            'is_business_expense' => false,
+            'rent_type' => null,
+            'is_goal' => false,
+            'error_type' => 'rate_limited',
         ];
     }
 
@@ -624,17 +717,18 @@ PROMPT;
     private function hybridResultToResponse(array $hybrid): array
     {
         $tag = $hybrid['suggested_tag'] ?? 'General';
+
         return [
-            'description'         => $hybrid['description'],
-            'amount'              => $hybrid['amount'],
-            'suggested_tag'       => $tag,
-            'type'                => $hybrid['type'],
-            'payment_method'      => $hybrid['payment_method'],
-            'has_invoice'         => $hybrid['has_invoice'],
+            'description' => $hybrid['description'],
+            'amount' => $hybrid['amount'],
+            'suggested_tag' => $tag,
+            'type' => $hybrid['type'],
+            'payment_method' => $hybrid['payment_method'],
+            'has_invoice' => $hybrid['has_invoice'],
             'is_business_expense' => $hybrid['is_business_expense'],
-            'rent_type'           => $hybrid['rent_type'],
-            'is_goal'             => str_starts_with($tag, 'Meta:'),
-            'error_type'          => $hybrid['error_type'],
+            'rent_type' => $hybrid['rent_type'],
+            'is_goal' => str_starts_with($tag, 'Meta:'),
+            'error_type' => $hybrid['error_type'],
         ];
     }
 
@@ -672,6 +766,7 @@ PROMPT;
             foreach ($categories as $cat) {
                 $result[$cat] = [];
             }
+
             return $result;
         }
 
@@ -688,7 +783,7 @@ PROMPT;
         $movementsList = [];
         foreach ($limitedMovements as $idx => $m) {
             $tag = $m['tag'] ?? 'Sin etiqueta';
-            $desc = !empty($m['description']) ? $m['description'] : 'sin descripción';
+            $desc = ! empty($m['description']) ? $m['description'] : 'sin descripción';
             $amount = number_format($m['amount'] ?? 0, 0, '', ',');
             $movementsList[] = "[$idx] Tag: \"$tag\" | Desc: \"$desc\" | \$$amount";
         }
@@ -751,24 +846,27 @@ PROMPT;
 
         $response = $this->callGroqAPI($prompt, 0.2, 1500, true);
 
-        if (!$response) {
+        if (! $response) {
             Log::warning('No se recibió respuesta de Groq - usando fallback de matching simple');
+
             return $this->simpleFallbackMatching($categories, $limitedMovements);
         }
 
         $jsonString = $this->extractJson($response);
-        if (!$jsonString) {
+        if (! $jsonString) {
             Log::warning('No se pudo extraer JSON de la respuesta');
             $result = [];
             foreach ($categories as $cat) {
                 $result[$cat] = [];
             }
+
             return $result;
         }
 
         $decoded = json_decode($jsonString, true);
-        if (!is_array($decoded)) {
+        if (! is_array($decoded)) {
             Log::error('JSON decodificado no es un array - usando fallback');
+
             return $this->simpleFallbackMatching($categories, $limitedMovements);
         }
 
@@ -779,7 +877,7 @@ PROMPT;
         foreach ($categories as $cat) {
             $result[$cat] = [
                 'tags' => [],
-                'keywords' => []
+                'keywords' => [],
             ];
         }
 
@@ -797,20 +895,20 @@ PROMPT;
                     $description = trim($limitedMovements[$idx]['description'] ?? '');
 
                     // Añadir tag único
-                    if (!in_array($tagName, $tags)) {
+                    if (! in_array($tagName, $tags)) {
                         $tags[] = $tagName;
                     }
 
                     // Extraer keywords de la descripción (palabras significativas)
-                    if (!empty($description) && $description !== 'sin descripción') {
+                    if (! empty($description) && $description !== 'sin descripción') {
                         // Convertir a minúsculas y dividir en palabras
                         $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($description), -1, PREG_SPLIT_NO_EMPTY);
 
                         // Filtrar palabras muy cortas y stopwords comunes
                         $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
                         foreach ($words as $word) {
-                            if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word)) {
-                                if (!in_array($word, $keywords)) {
+                            if (strlen($word) >= 3 && ! in_array($word, $stopwords) && ! is_numeric($word)) {
+                                if (! in_array($word, $keywords)) {
                                     $keywords[] = $word;
                                 }
                             }
@@ -827,7 +925,7 @@ PROMPT;
         foreach ($categories as $cat) {
             $result[$cat] = [
                 'tags' => array_values($categoryTags[$cat] ?? []),
-                'keywords' => array_values($categoryKeywords[$cat] ?? [])
+                'keywords' => array_values($categoryKeywords[$cat] ?? []),
             ];
         }
 
@@ -838,7 +936,7 @@ PROMPT;
         // VERIFICAR: Si Groq retornó TODO vacío, usar fallback
         $allEmpty = true;
         foreach ($result as $cat => $data) {
-            if (!empty($data['tags']) || !empty($data['keywords'])) {
+            if (! empty($data['tags']) || ! empty($data['keywords'])) {
                 $allEmpty = false;
                 break;
             }
@@ -846,6 +944,7 @@ PROMPT;
 
         if ($allEmpty && count($limitedMovements) > 0) {
             Log::warning('Groq retornó arrays vacíos para TODAS las categorías - usando fallback de matching simple');
+
             return $this->simpleFallbackMatching($categories, $limitedMovements);
         }
 
@@ -950,7 +1049,7 @@ PROMPT;
         $movementsByTag = [];
         foreach ($movements as $m) {
             $tag = $m['tag'] ?? 'Sin etiqueta';
-            if (!isset($movementsByTag[$tag])) {
+            if (! isset($movementsByTag[$tag])) {
                 $movementsByTag[$tag] = [];
             }
             $movementsByTag[$tag][] = $m;
@@ -958,7 +1057,7 @@ PROMPT;
 
         foreach ($categories as $catName) {
             // Skip if category already has tags
-            if (!empty($result[$catName]['tags'])) {
+            if (! empty($result[$catName]['tags'])) {
                 continue;
             }
 
@@ -972,24 +1071,26 @@ PROMPT;
                 // Match: tag name appears in category name, or category word appears in tag name
                 $matches = false;
                 foreach ($catWords as $word) {
-                    if (strlen($word) < 3) continue;
+                    if (strlen($word) < 3) {
+                        continue;
+                    }
                     if (mb_strpos($tagLower, $word) !== false || mb_strpos($catLower, $tagLower) !== false) {
                         $matches = true;
                         break;
                     }
                 }
 
-                if ($matches && !in_array($tagName, $result[$catName]['tags'])) {
+                if ($matches && ! in_array($tagName, $result[$catName]['tags'])) {
                     $result[$catName]['tags'][] = $tagName;
 
                     // Extract keywords from movement descriptions
                     $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
                     foreach ($tagMovements as $mov) {
                         $desc = trim($mov['description'] ?? '');
-                        if (!empty($desc) && $desc !== 'sin descripción') {
+                        if (! empty($desc) && $desc !== 'sin descripción') {
                             $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($desc), -1, PREG_SPLIT_NO_EMPTY);
                             foreach ($words as $word) {
-                                if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word) && !in_array($word, $result[$catName]['keywords'])) {
+                                if (strlen($word) >= 3 && ! in_array($word, $stopwords) && ! is_numeric($word) && ! in_array($word, $result[$catName]['keywords'])) {
                                     $result[$catName]['keywords'][] = $word;
                                 }
                             }
@@ -1036,7 +1137,7 @@ PROMPT;
     {
         Log::info('=== SIMPLE FALLBACK MATCHING STARTED ===', [
             'categories_count' => count($categories),
-            'movements_count'  => count($movements),
+            'movements_count' => count($movements),
         ]);
 
         // Initialize result structure
@@ -1054,20 +1155,20 @@ PROMPT;
 
         Log::info('Tags únicos encontrados', ['tags' => array_keys($movementsByTag)]);
 
-        $stopwords = ['de','del','la','el','en','con','por','para','y','a','un','una','los','las'];
+        $stopwords = ['de', 'del', 'la', 'el', 'en', 'con', 'por', 'para', 'y', 'a', 'un', 'una', 'los', 'las'];
 
         foreach ($categories as $categoryName) {
             $categoryLower = mb_strtolower($categoryName);
             $categoryWords = array_filter(
                 preg_split('/[\s\-_]+/', $categoryLower, -1, PREG_SPLIT_NO_EMPTY),
-                fn($w) => strlen($w) >= 3
+                fn ($w) => strlen($w) >= 3
             );
 
             $matchedTags = [];
-            $keywords    = [];
+            $keywords = [];
 
             foreach ($movementsByTag as $tagName => $tagMovements) {
-                $tagLower   = mb_strtolower($tagName);
+                $tagLower = mb_strtolower($tagName);
                 $shouldMatch = false;
 
                 // Strategy 1: FinancialMappingEngine — map tag and descriptions to a canonical category
@@ -1077,10 +1178,10 @@ PROMPT;
                 }
 
                 // Strategy 2: Also check individual movement descriptions through engine
-                if (!$shouldMatch) {
+                if (! $shouldMatch) {
                     foreach ($tagMovements as $mov) {
                         $desc = trim($mov['description'] ?? '');
-                        if (!empty($desc) && $desc !== 'sin descripción') {
+                        if (! empty($desc) && $desc !== 'sin descripción') {
                             $ec = FinancialMappingEngine::mapToCategory(mb_strtolower($desc));
                             if ($ec !== null && mb_strtolower($ec) === $categoryLower) {
                                 $shouldMatch = true;
@@ -1091,7 +1192,7 @@ PROMPT;
                 }
 
                 // Strategy 3: Direct substring match between tag words and category words
-                if (!$shouldMatch) {
+                if (! $shouldMatch) {
                     foreach ($categoryWords as $word) {
                         if (mb_strpos($tagLower, $word) !== false || mb_strpos($categoryLower, $tagLower) !== false) {
                             $shouldMatch = true;
@@ -1100,15 +1201,15 @@ PROMPT;
                     }
                 }
 
-                if ($shouldMatch && !in_array($tagName, $matchedTags)) {
+                if ($shouldMatch && ! in_array($tagName, $matchedTags)) {
                     $matchedTags[] = $tagName;
 
                     foreach ($tagMovements as $mov) {
                         $desc = trim($mov['description'] ?? '');
-                        if (!empty($desc) && $desc !== 'sin descripción') {
+                        if (! empty($desc) && $desc !== 'sin descripción') {
                             $words = preg_split('/[\s\-_,\.]+/', mb_strtolower($desc), -1, PREG_SPLIT_NO_EMPTY);
                             foreach ($words as $word) {
-                                if (strlen($word) >= 3 && !in_array($word, $stopwords) && !is_numeric($word) && !in_array($word, $keywords)) {
+                                if (strlen($word) >= 3 && ! in_array($word, $stopwords) && ! is_numeric($word) && ! in_array($word, $keywords)) {
                                     $keywords[] = $word;
                                 }
                             }
@@ -1118,17 +1219,18 @@ PROMPT;
             }
 
             $result[$categoryName] = [
-                'tags'     => array_values($matchedTags),
+                'tags' => array_values($matchedTags),
                 'keywords' => array_values($keywords),
             ];
 
             Log::info("Fallback matching para '{$categoryName}'", [
-                'matched_tags'   => $matchedTags,
+                'matched_tags' => $matchedTags,
                 'keywords_count' => count($keywords),
             ]);
         }
 
         Log::info('=== SIMPLE FALLBACK MATCHING COMPLETED ===');
+
         return $result;
     }
 }
