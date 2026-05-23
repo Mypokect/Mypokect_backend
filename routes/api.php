@@ -46,7 +46,7 @@ Route::post('/password-recovery/reset-password', [AuthController::class, 'resetP
     ->middleware('throttle:6,1');
 
 // --- RUTAS PROTEGIDAS (Sanctum) ---
-Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
+Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
 
     // 1. HOME & USUARIO
     Route::get('/home-data',          [AuthController::class, 'homeData']);
