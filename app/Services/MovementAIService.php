@@ -33,22 +33,17 @@ class MovementAIService
         Log::info('User ID', ['user_id' => $user->id]);
         Log::info('Transcription', ['text' => substr($transcription, 0, 100).'...']);
 
-        // ── Circuit breaker: salir rápido si Groq está rate-limited ──────────
-        // Retorna 'rate_limited' para que el controlador pueda devolver 429
-        // en vez del engañoso 422 "No se pudo interpretar el comando de voz".
-        if (GroqCircuitBreaker::isOpen()) {
-            Log::warning('suggestFromVoice bloqueado — Groq circuit breaker activo (rate limited)', [
-                'user_id' => $user->id,
-            ]);
-
-            return $this->rateLimitedResponse();
-        }
-
         try {
             // ── Layers 1–3: Cache → Rule engine → Short LLM (<80 tokens) ─────
-            // DB queries are deferred: Tags and Goals are only loaded if we reach
-            // Layer 4 (full LLM), which is the rare path. Layers 1–3 resolve
-            // without user-specific context (cache hit, rules, or mini-LLM).
+            // IMPORTANTE: El circuit breaker NO bloquea aquí. Las capas 1 (caché)
+            // y 2 (motor de reglas) no usan Groq en absoluto — pueden resolver la
+            // mayoría de comandos simples sin tocar la API. Solo la capa 3 (LLM
+            // corto) y la capa 4 (LLM completo) necesitan Groq. El circuit breaker
+            // se evalúa únicamente antes de esas llamadas.
+            //
+            // Bug anterior: el check de isOpen() salía antes de llamar al parser,
+            // lo que hacía fallar comandos como "gasté 50 mil en comida" (resolvible
+            // por reglas) cuando Groq estaba rate-limited.
             /** @var HybridTransactionParser $parser */
             $parser = app(HybridTransactionParser::class);
             $hybrid = $parser->parse($transcription, [], []);
@@ -72,6 +67,18 @@ class MovementAIService
             }
 
             // ── Layer 4: Full LLM (only when hybrid completely failed) ────────
+            // Solo en este punto verificamos el circuit breaker: si Groq está
+            // rate-limited y las reglas no pudieron resolver el comando, no tiene
+            // sentido intentar el LLM completo — devolvemos rate_limited para que
+            // el controlador muestre un mensaje claro al usuario.
+            if (GroqCircuitBreaker::isOpen()) {
+                Log::warning('suggestFromVoice: rules_partial Y circuit breaker activo — rate_limited', [
+                    'user_id' => $user->id,
+                ]);
+
+                return $this->rateLimitedResponse();
+            }
+
             // Load user context here — DB queries only on this rare path.
             Log::info('Hybrid rules_partial — falling back to full LLM prompt');
 
@@ -130,30 +137,25 @@ class MovementAIService
     public function suggestTag(string $description, float $amount, User $user): string
     {
         try {
-            // ── Circuit breaker: salir rápido si Groq está rate-limited ──────
-            // En este caso el engine de reglas ya resuelve la mayoría de casos,
-            // así que el LLM solo es necesario para casos ambiguos.
-            if (GroqCircuitBreaker::isOpen()) {
-                Log::info('suggestTag: circuit breaker activo — usando solo engine de reglas');
-                $fallback = FinancialMappingEngine::mapToCategory($description);
-
-                return $fallback ?? FinancialMappingEngine::enrichTag($description, 'General');
-            }
-
-            // Fast-path: deterministic mapping before calling LLM (zero token cost).
-            // DB query is deferred: only run if the engine matched (to prefer a user
-            // tag name) or if the engine missed (to build the LLM prompt).
+            // ── Fast-path: motor de reglas determinístico (sin Groq, sin costo) ─
+            // Se ejecuta SIEMPRE — independientemente del estado del circuit breaker.
+            // El circuit breaker solo controla si llamamos o no al LLM más adelante.
+            //
+            // Bug anterior: cuando el breaker estaba activo, el engine se ejecutaba
+            // sin consultar los tags del usuario, devolviendo categorías genéricas
+            // en lugar del tag exacto que el usuario ya tenía ("Comida" vs "Alimentos").
             $engineCategory = FinancialMappingEngine::mapToCategory($description);
 
-            if ($engineCategory !== null) {
-                // Engine matched — query DB only to check if the user has a tag whose
-                // name resembles the canonical category (e.g. "Comida" vs "Alimentos").
-                $existingTags = Tag::where('user_id', $user->id)
-                    ->withCount('movements')
-                    ->orderBy('movements_count', 'desc')
-                    ->pluck('name')
-                    ->toArray();
+            // ── Cargar tags del usuario una sola vez (query barata) ────────────
+            // Necesario tanto para el fast-path (match de nombre) como para el LLM.
+            $existingTags = Tag::where('user_id', $user->id)
+                ->withCount('movements')
+                ->orderBy('movements_count', 'desc')
+                ->pluck('name')
+                ->toArray();
 
+            if ($engineCategory !== null) {
+                // Engine matched — prefer user tag whose name overlaps with category
                 foreach ($existingTags as $tag) {
                     if (mb_stripos($tag, $engineCategory) !== false || mb_stripos($engineCategory, $tag) !== false) {
                         Log::info('suggestTag: engine fast-path matched user tag', ['tag' => $tag]);
@@ -166,13 +168,16 @@ class MovementAIService
                 return $engineCategory;
             }
 
-            // LLM path — engine had no match; load tags for prompt context.
-            $existingTags = Tag::where('user_id', $user->id)
-                ->withCount('movements')
-                ->orderBy('movements_count', 'desc')
-                ->pluck('name')
-                ->toArray();
+            // ── Engine no encontró match → intentar LLM (si el breaker lo permite) ─
+            // Si el circuit breaker está activo, el LLM está saturado; devolvemos
+            // el mejor fallback disponible sin hacer ninguna llamada HTTP.
+            if (GroqCircuitBreaker::isOpen()) {
+                Log::info('suggestTag: circuit breaker activo — engine no encontró match, usando fallback General');
 
+                return FinancialMappingEngine::enrichTag($description, 'General');
+            }
+
+            // LLM path — engine had no match; $existingTags already loaded above.
             $language = $this->detectLanguage($description, $existingTags);
             $prompt = $this->buildTagPrompt($description, $amount, $existingTags, $language);
             $response = $this->callGroqAPI($prompt, 0.1, 15);
