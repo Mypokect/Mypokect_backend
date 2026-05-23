@@ -181,7 +181,7 @@ class MovementAIService
 
         } catch (\Exception $e) {
             Log::error('suggestTag error', ['error' => $e->getMessage()]);
-            throw $e;
+            return FinancialMappingEngine::enrichTag($description, 'General');
         }
     }
 

@@ -67,7 +67,7 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::get('/tags', [TagController::class, 'index']);
     Route::post('/tags/create', [TagController::class, 'store']);
     Route::post('/tags/suggestion', [TagController::class, 'suggest'])
-        ->middleware('throttle:10,1');
+        ->middleware('throttle:30,1');
 
     // 4. CALENDARIO & PROGRAMADOS
     // getEvents MUST come before apiResource to avoid {scheduledTransaction} binding on "events"
