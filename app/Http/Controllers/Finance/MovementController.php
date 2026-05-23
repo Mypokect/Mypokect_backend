@@ -136,12 +136,16 @@ class MovementController extends Controller
                 'is_business_expense' => $movement->is_business_expense,
             ]);
 
-            // ── Sincronización Presupuesto ─────────────────────────────────────
-            $budgetImpact = $this->computeBudgetImpact($user, $movement);
-
-            // ── Alcancía con Fuga (Ahorro Reactivo) ───────────────────────────
-            $leakInfo = $this->applyLeakyBucket($user, $movement);
-            $this->recalculateSavingsChallenge($user);
+            // Post-commit side-effects in isolated try-catch so they never fail the response
+            $budgetImpact = null;
+            $leakInfo     = null;
+            try {
+                $budgetImpact = $this->computeBudgetImpact($user, $movement);
+                $leakInfo     = $this->applyLeakyBucket($user, $movement);
+                $this->recalculateSavingsChallenge($user);
+            } catch (\Exception $sideEffectEx) {
+                Log::warning("Side-effect error after movement {$movement->id} created: " . $sideEffectEx->getMessage());
+            }
 
             return $this->createdResponse([
                 'movement'      => new MovementResource($movement),
@@ -412,10 +416,15 @@ class MovementController extends Controller
             $movement->load('tag');
             DB::commit();
 
-            $budgetImpact = $this->computeBudgetImpact($user, $movement);
-            $this->recalculateSavingsChallenge($user);
-
             Log::info("Movement {$movement->id} updated by user {$user->id}");
+
+            $budgetImpact = null;
+            try {
+                $budgetImpact = $this->computeBudgetImpact($user, $movement);
+                $this->recalculateSavingsChallenge($user);
+            } catch (\Exception $sideEffectEx) {
+                Log::warning("Side-effect error after movement {$movement->id} updated: " . $sideEffectEx->getMessage());
+            }
 
             return $this->successResponse([
                 'movement'      => new MovementResource($movement),
