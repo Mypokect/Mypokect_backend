@@ -71,6 +71,14 @@ class MovementAIService
             $response = $this->callGroqAPI($prompt, 0.1, null, true);
 
             if (! $response) {
+                // If the hybrid parser extracted a valid amount, use it rather than
+                // discarding everything just because the LLM is unavailable.
+                if (($hybrid['amount'] ?? 0) > 0) {
+                    Log::warning('Full LLM failed but rules found amount — using partial result', [
+                        'amount' => $hybrid['amount'],
+                    ]);
+                    return $this->hybridResultToResponse($hybrid);
+                }
                 Log::error('Full LLM also failed — returning insufficient_data');
                 Log::info('VOICE AUDIT', ['user_said' => $transcription, 'groq_responded' => null, 'outcome' => 'all_failed']);
                 return $this->insufficientDataResponse();

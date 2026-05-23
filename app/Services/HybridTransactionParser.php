@@ -29,11 +29,13 @@ class HybridTransactionParser
 
     private const SLANG = [
         '/\bmedio\s+palo\b/i'                                    => 500_000,
+        '/\bmedio\s+mill[oó]n\b/i'                               => 500_000,
         '/\b(\d+(?:[.,]\d+)?)\s*palos?\b/i'                     => 1_000_000,
         '/\bun\s+mill[oó]n\b/i'                                  => 1_000_000,
         '/\b(\d+(?:[.,]\d+)?)\s*mill[oó]nes?\b/i'               => 1_000_000,
         '/\b(\d+(?:[.,]\d+)?)\s*lucas?\b/i'                     => 1_000,
         '/\b(\d+(?:[.,]\d+)?)\s*k\b/i'                          => 1_000,
+        '/\b(\d+(?:[.,]\d+)?)\s*mil\b/i'                        => 1_000,
     ];
 
     // ── Intent keyword lists ───────────────────────────────────────────────────
@@ -455,11 +457,15 @@ class HybridTransactionParser
 
     private function merge(array $rules, array $llm): array
     {
+        $llmAmount   = (float) ($llm['amount'] ?? 0.0);
+        $rulesAmount = $rules['amount'];
+        // Prefer LLM amount when it is larger than rules amount — the rules likely
+        // found a raw digit ("50") while the LLM correctly decoded slang ("50 mil"→50000).
+        $resolvedAmount = ($llmAmount > $rulesAmount) ? $llmAmount : $rulesAmount;
+
         return [
             // Rules win if they resolved the field; LLM fills gaps
-            'amount'              => $rules['amount'] !== 0.0
-                                        ? $rules['amount']
-                                        : (float) ($llm['amount'] ?? 0.0),
+            'amount'              => $resolvedAmount ?: $rulesAmount,
             'type'                => $rules['_confidence'] >= 0.3
                                         ? $rules['type']
                                         : ($llm['type'] ?? 'expense'),
