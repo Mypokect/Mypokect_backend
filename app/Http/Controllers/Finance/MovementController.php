@@ -635,6 +635,21 @@ class MovementController extends Controller
     {
         try {
             $user = Auth::user();
+
+            // ── Cooldown anti-doble-tap (2 s por usuario) ─────────────────────
+            // Evita que el app Flutter reintente automáticamente en errores
+            // transitorios y queme el throttle de 40/min en segundos.
+            // Usa el mismo mecanismo de Cache::lock que store() pero con TTL 2s.
+            $voiceLock = Cache::lock("voice_suggest_{$user->id}", 2);
+            if (! $voiceLock->get()) {
+                return response()->json([
+                    'status'      => 'error',
+                    'message'     => 'Espera un momento antes de intentar de nuevo.',
+                    'error_type'  => 'rate_limited',
+                    'retry_after' => 2,
+                ], 429);
+            }
+
             Log::info("User {$user->id} is requesting voice suggestion for: {$request->transcripcion}");
 
             $suggestion = $this->aiService->suggestFromVoice(
