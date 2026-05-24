@@ -546,11 +546,19 @@ class MovementController extends Controller
                 Log::warning('Side-effect error after batch store: ' . $sideEffectEx->getMessage());
             }
 
+            $totalIncome   = collect($request->movements)->where('type', 'income')->sum('amount');
+            $totalExpenses = collect($request->movements)->where('type', 'expense')->sum('amount');
+
             Log::info('Batch of ' . count($created) . " movements created by user {$user->id}");
 
             return $this->createdResponse([
                 'movements' => $created,
                 'count'     => count($created),
+                'balance_summary' => [
+                    'total_income'   => (float) $totalIncome,
+                    'total_expenses' => (float) $totalExpenses,
+                    'net'            => (float) ($totalIncome - $totalExpenses),
+                ],
             ], count($created) . ' movimientos registrados');
 
         } catch (\Exception $e) {

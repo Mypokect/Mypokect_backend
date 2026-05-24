@@ -278,25 +278,30 @@ class MovementAIService
     protected function buildVoiceBatchPrompt(string $transcription, string $tagsList, string $goalsList): string
     {
         $prompt = <<<PROMPT
-Parse Colombian Spanish daily summary. Extract ALL movements. JSON only — no markdown, no text.
+Parse Colombian Spanish daily financial summary. JSON only — no markdown, no text.
 IN: "$transcription"
 TAGS: $tagsList
 GOALS: $goalsList
 
 Return EXACTLY: {"movements":[...]}
-Each movement object: {"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":""}
+Each movement: {"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":""}
 
-type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé (default expense)
-amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000. Omit if amount=0.
-description: ≤5 words, match input language.
-suggested_tag: pick from TAGS, or: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/supermercado→Mercado, Rappi/restaurante/almuerzo/café→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas.
+CRITICAL RULES:
+- Extract EVERY distinct purchase, payment or income event as a separate object.
+- description: use the ORIGINAL words from the transcription (≤5 words). Do NOT invent labels.
+- If amount is ambiguous or unclear, use amount=0 — the user will correct it in the review screen.
+- Never merge two separate events into one object.
+
+type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé/pedí (default expense)
+amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000.
+suggested_tag: pick from TAGS first; fallback: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/supermercado→Mercado, Rappi/restaurante/almuerzo/café/pizza→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas.
 payment_method: nequi/daviplata/tarjeta/transferencia=digital | efectivo/cash=cash (default digital)
 has_invoice: factura/IVA=true (default false)
 is_business_expense: empresa/negocio/cliente=true (default false)
 rent_type (income only): sueldo/quincena=laboral, honorarios/freelance=honorarios, arriendo/intereses=capital, venta/negocio=comercial, else=otros; null for expense
 
-Example IN: "gasté 10k en café, 50k en gasolina y me llegó la quincena de 1 palo"
-Example OUT: {"movements":[{"amount":10000,"description":"café","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":50000,"description":"gasolina","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Transporte"},{"amount":1000000,"description":"quincena","type":"income","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","suggested_tag":""}]}
+Example IN: "gasté 10k en café, 50k en gasolina, pedí pizza dominos y me llegó la quincena de 1 palo"
+Example OUT: {"movements":[{"amount":10000,"description":"café","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":50000,"description":"gasolina","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Transporte"},{"amount":0,"description":"pizza dominos","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":1000000,"description":"quincena","type":"income","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","suggested_tag":""}]}
 PROMPT;
 
         return $prompt;
@@ -327,7 +332,7 @@ PROMPT;
 
             foreach ($data['movements'] as $item) {
                 $amount = (float) ($item['amount'] ?? 0);
-                if ($amount <= 0) continue;
+                if ($amount < 0) continue;
 
                 $type     = in_array($item['type'] ?? '', ['income', 'expense']) ? $item['type'] : 'expense';
                 $rentType = ($type === 'income' && in_array($item['rent_type'] ?? '', $validRentTypes))
