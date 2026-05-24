@@ -63,6 +63,14 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
         ->middleware('throttle:60,1');
 
+    // IA de Voz — Resumen Diario (extrae múltiples movimientos en un solo comando)
+    Route::post('/movements/sugerir-voz-batch', [MovementController::class, 'suggestBatchFromVoice'])
+        ->middleware('throttle:20,1');
+
+    // Guardar múltiples movimientos de un resumen diario
+    Route::post('/movements/batch', [MovementController::class, 'storeBatch'])
+        ->middleware('throttle:30,1');
+
     // 3. ETIQUETAS (TAGS)
     Route::get('/tags', [TagController::class, 'index']);
     Route::post('/tags/create', [TagController::class, 'store']);
@@ -119,6 +127,7 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::post('/budgets/{budget}/apply-ai-tags', [BudgetController::class, 'applyAITags']);
     Route::post('/budgets/{budget}/link-movements', [BudgetController::class, 'linkMovements']);
     Route::post('/budgets/{budget}/move-movement', [BudgetController::class, 'moveMovement']);
+    Route::post('/budgets/{budget}/reclassify-movement', [BudgetController::class, 'reclassifyMovement'])->middleware('throttle:60,1');
     Route::post('/budgets/{budget}/reactivate', [BudgetController::class, 'reactivateBudget']);
     Route::post('/budgets/{budget}/duplicate', [BudgetController::class, 'duplicateBudget']);
 

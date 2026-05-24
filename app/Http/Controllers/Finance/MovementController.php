@@ -466,6 +466,101 @@ class MovementController extends Controller
     }
 
     /**
+     * Suggest a batch of movements from a voice daily-summary.
+     */
+    public function suggestBatchFromVoice(VoiceSuggestionRequest $request): JsonResponse
+    {
+        try {
+            $user = Auth::user();
+            Log::info("User {$user->id} requesting batch voice suggestion: {$request->transcripcion}");
+
+            $result = $this->aiService->suggestBatchFromVoice($request->transcripcion, $user);
+
+            if (empty($result['movements'])) {
+                return $this->errorResponse('No se detectaron movimientos en el resumen.', 422);
+            }
+
+            return $this->successResponse(['movements' => $result['movements']]);
+
+        } catch (\Exception $e) {
+            Log::error('Error processing batch voice suggestion: ' . $e->getMessage());
+            return $this->errorResponse('Error en proceso de IA: ' . $this->safeMessage($e));
+        }
+    }
+
+    /**
+     * Store multiple movements from a single batch request (daily summary).
+     * Accepts { "movements": [...] } — max 20 items.
+     */
+    public function storeBatch(Request $request): JsonResponse
+    {
+        $request->validate([
+            'movements'                       => 'required|array|min:1|max:20',
+            'movements.*.type'                => 'required|in:income,expense',
+            'movements.*.amount'              => 'required|numeric|min:0.01',
+            'movements.*.description'         => 'nullable|string|max:255',
+            'movements.*.payment_method'      => 'nullable|in:cash,digital',
+            'movements.*.tag_name'            => 'nullable|string|max:100',
+            'movements.*.has_invoice'         => 'nullable|boolean',
+            'movements.*.is_business_expense' => 'nullable|boolean',
+            'movements.*.rent_type'           => 'nullable|in:laboral,honorarios,capital,comercial,otros',
+        ]);
+
+        try {
+            $user    = Auth::user();
+            $created = [];
+
+            DB::beginTransaction();
+
+            foreach ($request->movements as $m) {
+                $tagId   = null;
+                $tagName = trim($m['tag_name'] ?? '');
+                if (! empty($tagName)) {
+                    $tag   = Tag::firstOrCreate(['user_id' => $user->id, 'name' => ucfirst(strtolower($tagName))]);
+                    $tagId = $tag->id;
+                }
+
+                $type     = $m['type'];
+                $movement = Movement::create([
+                    'type'                => $type,
+                    'amount'              => $m['amount'],
+                    'description'         => $m['description'] ?? 'Movimiento',
+                    'payment_method'      => $m['payment_method'] ?? 'digital',
+                    'has_invoice'         => $m['has_invoice'] ?? false,
+                    'is_business_expense' => $m['is_business_expense'] ?? false,
+                    'rent_type'           => $type === 'income' ? ($m['rent_type'] ?? null) : null,
+                    'user_id'             => $user->id,
+                    'tag_id'              => $tagId,
+                    'is_digital'          => ($m['payment_method'] ?? 'digital') === 'digital',
+                ]);
+
+                $movement->load('tag');
+                $created[] = new MovementResource($movement);
+            }
+
+            DB::commit();
+
+            try {
+                $this->recalculateSavingsChallenge($user);
+            } catch (\Exception $sideEffectEx) {
+                Log::warning('Side-effect error after batch store: ' . $sideEffectEx->getMessage());
+            }
+
+            Log::info('Batch of ' . count($created) . " movements created by user {$user->id}");
+
+            return $this->createdResponse([
+                'movements' => $created,
+                'count'     => count($created),
+            ], count($created) . ' movimientos registrados');
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error('Error creating batch movements: ' . $e->getMessage());
+            return $this->errorResponse('Error al guardar los movimientos: ' . $this->safeMessage($e));
+        }
+    }
+
+    /**
      * Suggest movement from voice.
      *
      * Uses AI to parse a voice transcription and suggest movement fields (amount, tag, type, description).

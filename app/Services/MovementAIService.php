@@ -237,6 +237,124 @@ class MovementAIService
     }
 
     /**
+     * Suggest multiple movements from a voice daily-summary transcription.
+     * Returns ['movements' => [...], 'error' => ?string].
+     */
+    public function suggestBatchFromVoice(string $transcription, User $user): array
+    {
+        Log::info('=== SUGGEST BATCH FROM VOICE STARTED ===', ['user_id' => $user->id]);
+
+        try {
+            $existingTags = Tag::where('user_id', $user->id)->pluck('name')->toArray();
+            $savingGoals  = SavingGoal::where('user_id', $user->id)->pluck('name')->toArray();
+
+            $tagsList  = empty($existingTags) ? 'None' : implode(', ', $existingTags);
+            $goalsList = empty($savingGoals)  ? 'None' : implode(', ', $savingGoals);
+
+            $prompt   = $this->buildVoiceBatchPrompt($transcription, $tagsList, $goalsList);
+            $response = $this->callGroqAPI($prompt, 0.1, null, true);
+
+            if (! $response) {
+                Log::warning('Batch voice LLM returned null');
+                return ['movements' => [], 'error' => 'no_response'];
+            }
+
+            Log::info('BATCH VOICE AUDIT', [
+                'user_said'      => $transcription,
+                'groq_responded' => substr($response, 0, 500),
+            ]);
+
+            return $this->normalizeBatchMovements($response);
+
+        } catch (\Exception $e) {
+            Log::error('ERROR in suggestBatchFromVoice', ['error' => $e->getMessage()]);
+            return ['movements' => [], 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Batch extraction prompt: returns {"movements":[...]}.
+     */
+    protected function buildVoiceBatchPrompt(string $transcription, string $tagsList, string $goalsList): string
+    {
+        $prompt = <<<PROMPT
+Parse Colombian Spanish daily summary. Extract ALL movements. JSON only — no markdown, no text.
+IN: "$transcription"
+TAGS: $tagsList
+GOALS: $goalsList
+
+Return EXACTLY: {"movements":[...]}
+Each movement object: {"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":""}
+
+type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé (default expense)
+amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000. Omit if amount=0.
+description: ≤5 words, match input language.
+suggested_tag: pick from TAGS, or: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/supermercado→Mercado, Rappi/restaurante/almuerzo/café→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas.
+payment_method: nequi/daviplata/tarjeta/transferencia=digital | efectivo/cash=cash (default digital)
+has_invoice: factura/IVA=true (default false)
+is_business_expense: empresa/negocio/cliente=true (default false)
+rent_type (income only): sueldo/quincena=laboral, honorarios/freelance=honorarios, arriendo/intereses=capital, venta/negocio=comercial, else=otros; null for expense
+
+Example IN: "gasté 10k en café, 50k en gasolina y me llegó la quincena de 1 palo"
+Example OUT: {"movements":[{"amount":10000,"description":"café","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":50000,"description":"gasolina","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Transporte"},{"amount":1000000,"description":"quincena","type":"income","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","suggested_tag":""}]}
+PROMPT;
+
+        return $prompt;
+    }
+
+    /**
+     * Normalize and validate batch movement list from AI response.
+     */
+    protected function normalizeBatchMovements(string $rawResponse): array
+    {
+        try {
+            $data = json_decode($rawResponse, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                $jsonString = $this->extractJson($rawResponse);
+                if ($jsonString) {
+                    $data = json_decode($jsonString, true);
+                }
+            }
+
+            if (! $data || ! is_array($data) || ! isset($data['movements']) || ! is_array($data['movements'])) {
+                Log::warning('Batch AI response missing movements array');
+                return ['movements' => []];
+            }
+
+            $validRentTypes = ['laboral', 'honorarios', 'capital', 'comercial', 'otros'];
+            $normalized     = [];
+
+            foreach ($data['movements'] as $item) {
+                $amount = (float) ($item['amount'] ?? 0);
+                if ($amount <= 0) continue;
+
+                $type     = in_array($item['type'] ?? '', ['income', 'expense']) ? $item['type'] : 'expense';
+                $rentType = ($type === 'income' && in_array($item['rent_type'] ?? '', $validRentTypes))
+                    ? $item['rent_type']
+                    : null;
+
+                $normalized[] = [
+                    'amount'              => $amount,
+                    'description'         => trim($item['description'] ?? '') ?: 'Movimiento',
+                    'type'                => $type,
+                    'payment_method'      => in_array($item['payment_method'] ?? '', ['cash', 'digital']) ? $item['payment_method'] : 'digital',
+                    'has_invoice'         => (bool) ($item['has_invoice'] ?? false),
+                    'is_business_expense' => (bool) ($item['is_business_expense'] ?? false),
+                    'rent_type'           => $rentType,
+                    'suggested_tag'       => ucfirst(strtolower(trim($item['suggested_tag'] ?? ''))),
+                ];
+            }
+
+            return ['movements' => $normalized];
+
+        } catch (\Exception $e) {
+            Log::error('ERROR in normalizeBatchMovements', ['error' => $e->getMessage()]);
+            return ['movements' => []];
+        }
+    }
+
+    /**
      * Build the voice movement extraction prompt.
      * Extracts: amount, type, description, payment_method, has_invoice,
      *           is_business_expense, rent_type, suggested_tag, error_type.
