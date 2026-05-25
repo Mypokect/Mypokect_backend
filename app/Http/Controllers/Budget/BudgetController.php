@@ -1562,4 +1562,70 @@ class BudgetController extends Controller
             return $this->errorResponse($this->safeMessage($e));
         }
     }
+
+    /**
+     * Reclassifies a movement from one category to another within the SAME budget.
+     * Updates the movement's tag_id to the first linked tag of the target category.
+     * Returns refreshed spending data so the UI can update bars reactively.
+     *
+     * @bodyParam movement_id       int    required Movement to reclassify. Example: 42
+     * @bodyParam new_category_name string required Target category name.   Example: "Transporte"
+     */
+    public function reclassifyMovement(Request $request, Budget $budget): JsonResponse
+    {
+        try {
+            if ($budget->user_id !== Auth::id()) {
+                return $this->unauthorizedResponse();
+            }
+
+            $validated = Validator::make($request->all(), [
+                'movement_id'       => 'required|integer|min:1',
+                'new_category_name' => 'required|string|max:255',
+            ]);
+            if ($validated->fails()) {
+                return $this->validationErrorResponse($validated->errors());
+            }
+
+            $user = Auth::user();
+            $budget->load('categories');
+
+            // Security: new category must belong to THIS budget
+            $newCategory = $budget->categories->first(
+                fn ($c) => $c->name === $request->new_category_name
+            );
+            if (! $newCategory) {
+                return $this->validationErrorResponse(
+                    null,
+                    "La categoría '{$request->new_category_name}' no pertenece a este presupuesto."
+                );
+            }
+
+            // Resolve the tag for the target category
+            $tagNames = $this->extractTagNames($newCategory->linked_tags ?? []);
+            $tagName  = ! empty($tagNames) ? $tagNames[0] : $newCategory->name;
+            $tag      = Tag::firstOrCreate(['user_id' => $user->id, 'name' => $tagName]);
+
+            // Update the movement
+            $updated = Movement::where('user_id', $user->id)
+                ->where('id', $request->movement_id)
+                ->update(['tag_id' => $tag->id]);
+
+            if (! $updated) {
+                return $this->errorResponse('Movimiento no encontrado o no autorizado', 404);
+            }
+
+            // Return refreshed execution data so Flutter can update bars immediately
+            $categories = $this->enrichCategoriesWithExecution($budget);
+
+            return $this->successResponse([
+                'categories'  => $categories,
+                'new_tag'     => $tagName,
+                'category'    => $request->new_category_name,
+            ], 'Movimiento reclasificado exitosamente.');
+
+        } catch (\Exception $e) {
+            Log::error('Error reclassifying movement: '.$e->getMessage());
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
 }

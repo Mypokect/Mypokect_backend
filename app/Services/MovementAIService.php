@@ -286,22 +286,23 @@ GOALS: $goalsList
 Return EXACTLY: {"movements":[...]}
 Each movement: {"amount":0,"description":"","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":""}
 
-CRITICAL RULES:
-- Extract EVERY distinct purchase, payment or income event as a separate object.
-- description: use the ORIGINAL words from the transcription (≤5 words). Do NOT invent labels.
-- If amount is ambiguous or unclear, use amount=0 — the user will correct it in the review screen.
-- Never merge two separate events into one object.
+CRITICAL RULES — FOLLOW EXACTLY:
+1. REGLA DE ORO: Solo extrae movimientos que tengan MONTO EXPLÍCITO y ACCIÓN CLARA (gasté, pagué, compré, llegó, cobré, etc). Si una frase es ambigua, informativa o no tiene acción financiera directa, IGNÓRALA completamente. No inventes movimientos basados en contexto.
+2. UN PAGO = UN MOVIMIENTO: Si el usuario pagó UN solo monto por varios artículos ("pagué 20 mil de carne y papas", "compré arroz y aceite por 35k"), extráelo como UN ÚNICO movimiento. NO lo separes en múltiples objetos. Los artículos van juntos en la descripción.
+3. MONTO PROPIO: Cada movimiento en el JSON debe tener su propio monto declarado explícitamente. Si varios artículos comparten un monto, son UN movimiento.
+4. description: usa las palabras ORIGINALES de la transcripción (≤5 palabras). NO inventes etiquetas ni nombres.
+5. Si el monto es ambiguo o no se mencionó, usa amount=0 — el usuario lo corregirá en la pantalla de revisión.
 
 type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé/pedí (default expense)
-amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000.
+amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000, mil=×1000.
 suggested_tag: pick from TAGS first; fallback: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/supermercado→Mercado, Rappi/restaurante/almuerzo/café/pizza→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas.
 payment_method: nequi/daviplata/tarjeta/transferencia=digital | efectivo/cash=cash (default digital)
 has_invoice: factura/IVA=true (default false)
 is_business_expense: empresa/negocio/cliente=true (default false)
 rent_type (income only): sueldo/quincena=laboral, honorarios/freelance=honorarios, arriendo/intereses=capital, venta/negocio=comercial, else=otros; null for expense
 
-Example IN: "gasté 10k en café, 50k en gasolina, pedí pizza dominos y me llegó la quincena de 1 palo"
-Example OUT: {"movements":[{"amount":10000,"description":"café","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":50000,"description":"gasolina","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Transporte"},{"amount":0,"description":"pizza dominos","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":1000000,"description":"quincena","type":"income","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","suggested_tag":""}]}
+Example IN: "pagué 20 mil de carne y papas, 50k en gasolina, pedí pizza sin precio, me llegó la quincena de 1 palo"
+Example OUT: {"movements":[{"amount":20000,"description":"carne y papas","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Mercado"},{"amount":50000,"description":"gasolina","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Transporte"},{"amount":0,"description":"pizza","type":"expense","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":null,"suggested_tag":"Comida"},{"amount":1000000,"description":"quincena","type":"income","payment_method":"digital","has_invoice":false,"is_business_expense":false,"rent_type":"laboral","suggested_tag":""}]}
 PROMPT;
 
         return $prompt;
@@ -372,8 +373,10 @@ IN: "$transcription"
 TAGS: $tagsList
 GOALS: $goalsList
 
+REGLA CRÍTICA: Solo extrae el movimiento si tiene un MONTO y una ACCIÓN clara (gasté, pagué, compré, llegó, cobré). Si la frase es ambigua o solo informativa, usa error_type=insufficient_data. No inventes movimientos. Una compra de varios artículos bajo un solo monto es UN movimiento (ej: "pagué 20 mil de carne y papas" → amount=20000, description="carne y papas").
+
 type: income=llegó/pagaron/cobré/quincena/sueldo/ingresó | expense=gasté/pagué/compré/mandé (default expense)
-amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000. amount=0+error_type=insufficient_data if missing.
+amount: luca/lucas=×1000, k=×1000, palo/palos=×1M, medio palo=500000, mil=×1000. amount=0+error_type=insufficient_data if missing.
 description: ≤5 words, match input language.
 suggested_tag: pick from TAGS, or use: Uber/taxi/bus→Transporte, D1/Éxito/Jumbo/Mercado→Mercado, Rappi/restaurante/almuerzo/café→Comida, Netflix/Spotify/cine→Entretenimiento, arriendo→Vivienda, luz/agua/internet/Claro→Servicios, farmacia/médico/EPS→Salud, universidad/curso→Educación, ropa/zapatos→Ropa, gym/deporte→Deporte, banco/crédito/Nequi→Finanzas. If goal use "Meta: <goal>". NEVER "Otros".
 payment_method: nequi/daviplata/tarjeta/transferencia=digital | efectivo/cash=cash (default digital)
