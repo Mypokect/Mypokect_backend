@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Finance;
 use App\Helpers\SchemaCache;
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
+use App\Models\GoalContribution;
 use App\Models\SavingGoal;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -54,6 +55,12 @@ class SavingsController extends Controller
 
             $disponible = $incomes - $expenses;
             $gastoPromedioDiario = $expenses > 0 ? round($expenses / 30, 2) : 0.0;
+
+            // Days of current month for countdown
+            $now              = Carbon::now();
+            $diaActual        = $now->day;
+            $diasDelMes       = $now->daysInMonth;
+            $diasRestantesMes = $diasDelMes - $diaActual + 1;
 
             // ── Three pre-configured plans (backward compat) ─────────────────
             $planes = array_map(function (array $cfg) use ($incomes, $disponible) {
@@ -116,13 +123,14 @@ class SavingsController extends Controller
                 $customAnalysis = [
                     'valor_ahorro_deseado' => $valorAhorroDeseado,
                     'presupuesto_diario_restante' => $presupuestoDiarioRestante,
-                    'gasto_promedio_diario' => $gastoPromedioDiario,
-                    'riesgo_incumplimiento' => $riesgoIncumplimiento,
-                    'es_viable' => $presupuestoDiarioRestante >= 0,
-                    'meses_para_meta' => $mesesParaMeta,
-                    'meta_nombre' => $metaNombre,
-                    'meta_total' => $metaTotal,
-                    'meta_restante' => $metaRestante,
+                    'gasto_promedio_diario'       => $gastoPromedioDiario,
+                    'riesgo_incumplimiento'       => $riesgoIncumplimiento,
+                    'es_viable'                   => $presupuestoDiarioRestante >= 0,
+                    'meses_para_meta'             => $mesesParaMeta,
+                    'meta_nombre'                 => $metaNombre,
+                    'meta_id'                     => $goal?->id,
+                    'meta_total'                  => $metaTotal,
+                    'meta_restante'               => $metaRestante,
                 ];
             }
 
@@ -161,6 +169,87 @@ class SavingsController extends Controller
                 ? min(1.0, round($ahorroProtegidoActual / $ahorroReservadoMes, 4))
                 : 0.0;
 
+            // Auto-fill custom_analysis when challenge is active but no amount was requested
+            if ($customAnalysis === null && $hasActiveChallenge && $savingsAmount > 0) {
+                $presupDiario = round(($incomes - $expenses - $savingsAmount) / max(1, $diasRestantesMes), 2);
+                $riesgoAuto   = $presupDiario < $gastoPromedioDiario;
+
+                $goalAuto = SavingGoal::where('user_id', $user->id)
+                    ->whereIn('status', ['active', 'pending', 'en_progreso', 'in_progress'])
+                    ->orderBy('created_at', 'desc')
+                    ->first();
+                if (! $goalAuto) {
+                    $goalAuto = SavingGoal::where('user_id', $user->id)
+                        ->whereNull('deleted_at')
+                        ->orderBy('created_at', 'desc')
+                        ->first();
+                }
+
+                $autoMesesParaMeta = null;
+                $autoMetaNombre    = null;
+                $autoMetaId        = null;
+                $autoMetaTotal     = null;
+                $autoMetaRestante  = null;
+
+                if ($goalAuto) {
+                    $autoMetaTotal    = (float) $goalAuto->target_amount;
+                    $autoSaved        = (float) $goalAuto->contributions()->sum('amount');
+                    $autoMetaRestante = max(0.0, $autoMetaTotal - $autoSaved);
+                    $autoMesesParaMeta = $savingsAmount > 0
+                        ? (int) ceil($autoMetaRestante / $savingsAmount)
+                        : null;
+                    $autoMetaNombre = $goalAuto->name;
+                    $autoMetaId     = $goalAuto->id;
+                }
+
+                $customAnalysis = [
+                    'valor_ahorro_deseado'        => $savingsAmount,
+                    'presupuesto_diario_restante' => $presupDiario,
+                    'gasto_promedio_diario'       => $gastoPromedioDiario,
+                    'riesgo_incumplimiento'       => $riesgoAuto,
+                    'es_viable'                   => $presupDiario >= 0,
+                    'meses_para_meta'             => $autoMesesParaMeta,
+                    'meta_nombre'                 => $autoMetaNombre,
+                    'meta_id'                     => $autoMetaId,
+                    'meta_total'                  => $autoMetaTotal,
+                    'meta_restante'               => $autoMetaRestante,
+                ];
+            }
+
+            // ── Detect existing savings registration this month ────────────────
+            $ahorroYaRegistrado = false;
+            $montoRegistrado    = 0.0;
+            $tipoRegistro       = null;
+
+            // Check for expense movement tagged "Ahorro"
+            $movimientoAhorro = $user->movements()
+                ->where('type', 'expense')
+                ->whereHas('tag', fn ($q) => $q->whereRaw('LOWER(name) = ?', ['ahorro']))
+                ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                ->orderByDesc('amount')
+                ->first();
+
+            // Check for goal contribution this month (if linked goal)
+            $contribucionMeta = null;
+            $metaIdParaCheck  = $customAnalysis['meta_id'] ?? null;
+            if ($metaIdParaCheck) {
+                $contribucionMeta = GoalContribution::where('user_id', $user->id)
+                    ->where('goal_id', $metaIdParaCheck)
+                    ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                    ->orderByDesc('created_at')
+                    ->first();
+            }
+
+            if ($contribucionMeta) {
+                $ahorroYaRegistrado = true;
+                $montoRegistrado    = (float) $contribucionMeta->amount;
+                $tipoRegistro       = 'contribucion';
+            } elseif ($movimientoAhorro) {
+                $ahorroYaRegistrado = true;
+                $montoRegistrado    = (float) $movimientoAhorro->amount;
+                $tipoRegistro       = 'movimiento';
+            }
+
             return $this->successResponse([
                 'ingresos' => $incomes,
                 'gastos' => $expenses,
@@ -174,9 +263,15 @@ class SavingsController extends Controller
                 'savings_mode_amount' => $savingsAmount,
                 'ahorro_reservado_mes' => $ahorroReservadoMes,
                 'ahorro_protegido_actual' => $ahorroProtegidoActual,
-                'dinero_fugado_mes' => $dineroFugadoMes,
-                'disponible_para_vivir' => $disponibleParaVivir,
-                'porcentaje_logro' => $porcentajeLogro,
+                'dinero_fugado_mes'       => $dineroFugadoMes,
+                'disponible_para_vivir'   => $disponibleParaVivir,
+                'porcentaje_logro'        => $porcentajeLogro,
+                'dia_del_mes'             => $diaActual,
+                'dias_del_mes'            => $diasDelMes,
+                'dias_restantes_mes'      => $diasRestantesMes,
+                'ahorro_ya_registrado'    => $ahorroYaRegistrado,
+                'monto_registrado'        => $montoRegistrado,
+                'tipo_registro'           => $tipoRegistro,
             ]);
 
         } catch (\Throwable $e) {

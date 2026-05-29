@@ -42,13 +42,18 @@ class MovementController extends Controller
         try {
             $user = Auth::user();
             $perPage = min((int) $request->query('per_page', 20), 100);
+            $month   = (int) $request->query('month', 0);
+            $year    = (int) $request->query('year', 0);
 
-            Log::info("User {$user->id} is requesting movements list (per_page={$perPage}).");
+            Log::info("User {$user->id} is requesting movements list (per_page={$perPage}, month={$month}, year={$year}).");
 
-            $movements = $user->movements()
-                ->with('tag')
-                ->orderBy('created_at', 'desc')
-                ->paginate($perPage);
+            $query = $user->movements()->with('tag')->orderBy('created_at', 'desc');
+
+            if ($month > 0 && $year > 0) {
+                $query->whereYear('created_at', $year)->whereMonth('created_at', $month);
+            }
+
+            $movements = $query->paginate($perPage);
 
             return $this->successResponse([
                 'data' => MovementResource::collection($movements),
