@@ -282,6 +282,16 @@ class AuthController extends Controller
         $balance = $incomes - $expenses;
         $flujoNeto = $balance;
 
+        // All-time balance: sums every movement the user ever recorded
+        $allTimeRow = DB::selectOne(
+            'SELECT
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0) AS total_income,
+                COALESCE(SUM(CASE WHEN type = ? THEN amount ELSE 0 END), 0) AS total_expense
+             FROM movements WHERE user_id = ?',
+            ['income', 'expense', $user->id]
+        );
+        $saldoHistorico = (float) ($allTimeRow->total_income ?? 0) - (float) ($allTimeRow->total_expense ?? 0);
+
         // ── Semáforo ──────────────────────────────────────────────────────────
         $statusLabel = 'Sin actividad';
         $statusColor = 'grey';
@@ -435,7 +445,7 @@ class AuthController extends Controller
             'status' => 'success',
             'data' => [
                 'name' => $user->name ?? '',
-                'balance_total' => (float) $balance,
+                'balance_total' => (float) $saldoHistorico,
                 'flujo_neto' => (float) $flujoNeto,
                 'ahorro_reservado' => (float) $ahorroReservadoMes,
                 'disponible_para_vivir' => (float) $disponibleParaVivir,
