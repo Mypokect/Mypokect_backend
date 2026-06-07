@@ -250,8 +250,16 @@ class SavingsController extends Controller
                 $tipoRegistro       = 'movimiento';
             }
 
-            // Cumulative total across all months (sum of all goal contributions ever)
-            $ahorroProtegidoTotal = (float) GoalContribution::where('user_id', $user->id)->sum('amount');
+            // Cumulative savings split: previous months + this month
+            $ahorroMesesAnteriores = (float) GoalContribution::where('user_id', $user->id)
+                ->where('created_at', '<', $startOfMonth)
+                ->sum('amount');
+
+            $ahorroContribucionMes = (float) GoalContribution::where('user_id', $user->id)
+                ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
+
+            $ahorroProtegidoTotal = $ahorroMesesAnteriores + $ahorroContribucionMes;
 
             return $this->successResponse([
                 'ingresos' => $incomes,
@@ -265,8 +273,10 @@ class SavingsController extends Controller
                 'savings_mode_pct' => $savingsPct,
                 'savings_mode_amount' => $savingsAmount,
                 'ahorro_reservado_mes' => $ahorroReservadoMes,
-                'ahorro_protegido_actual' => $ahorroProtegidoActual,
-                'ahorro_protegido_total'  => $ahorroProtegidoTotal,
+                'ahorro_protegido_actual'   => $ahorroProtegidoActual,
+                'ahorro_protegido_total'    => $ahorroProtegidoTotal,
+                'ahorro_meses_anteriores'   => $ahorroMesesAnteriores,
+                'ahorro_contribucion_mes'   => $ahorroContribucionMes,
                 'dinero_fugado_mes'       => $dineroFugadoMes,
                 'disponible_para_vivir'   => $disponibleParaVivir,
                 'porcentaje_logro'        => $porcentajeLogro,
