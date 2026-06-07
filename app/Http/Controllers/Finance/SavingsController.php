@@ -251,15 +251,31 @@ class SavingsController extends Controller
             }
 
             // Cumulative savings split: previous months + this month
-            $ahorroMesesAnteriores = (float) GoalContribution::where('user_id', $user->id)
+            // Sources: goal_contributions AND expense movements tagged "Ahorro"
+            $contribucionesMesesAnt = (float) GoalContribution::where('user_id', $user->id)
                 ->where('created_at', '<', $startOfMonth)
                 ->sum('amount');
 
-            $ahorroContribucionMes = (float) GoalContribution::where('user_id', $user->id)
+            $movimientosAhorroAnt = (float) $user->movements()
+                ->where('type', 'expense')
+                ->whereHas('tag', fn ($q) => $q->whereRaw('LOWER(name) = ?', ['ahorro']))
+                ->where('created_at', '<', $startOfMonth)
+                ->sum('amount');
+
+            $ahorroMesesAnteriores = $contribucionesMesesAnt + $movimientosAhorroAnt;
+
+            $contribucionesMesActual = (float) GoalContribution::where('user_id', $user->id)
                 ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
                 ->sum('amount');
 
-            $ahorroProtegidoTotal = $ahorroMesesAnteriores + $ahorroContribucionMes;
+            $movimientosAhorroMes = (float) $user->movements()
+                ->where('type', 'expense')
+                ->whereHas('tag', fn ($q) => $q->whereRaw('LOWER(name) = ?', ['ahorro']))
+                ->whereBetween('created_at', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
+
+            $ahorroContribucionMes = $contribucionesMesActual + $movimientosAhorroMes;
+            $ahorroProtegidoTotal  = $ahorroMesesAnteriores + $ahorroContribucionMes;
 
             return $this->successResponse([
                 'ingresos' => $incomes,
