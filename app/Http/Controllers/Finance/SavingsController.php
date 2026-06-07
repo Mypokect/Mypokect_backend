@@ -250,6 +250,9 @@ class SavingsController extends Controller
                 $tipoRegistro       = 'movimiento';
             }
 
+            // Cumulative total across all months (sum of all goal contributions ever)
+            $ahorroProtegidoTotal = (float) GoalContribution::where('user_id', $user->id)->sum('amount');
+
             return $this->successResponse([
                 'ingresos' => $incomes,
                 'gastos' => $expenses,
@@ -263,6 +266,7 @@ class SavingsController extends Controller
                 'savings_mode_amount' => $savingsAmount,
                 'ahorro_reservado_mes' => $ahorroReservadoMes,
                 'ahorro_protegido_actual' => $ahorroProtegidoActual,
+                'ahorro_protegido_total'  => $ahorroProtegidoTotal,
                 'dinero_fugado_mes'       => $dineroFugadoMes,
                 'disponible_para_vivir'   => $disponibleParaVivir,
                 'porcentaje_logro'        => $porcentajeLogro,
