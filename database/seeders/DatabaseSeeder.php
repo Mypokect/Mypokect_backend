@@ -27,6 +27,9 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
+        // Planes SaaS + roles (idempotente). Entra en migrate:fresh --seed.
+        $this->call(SaasSeeder::class);
+
         $this->call(ReminderSeeder::class);
     }
 }
