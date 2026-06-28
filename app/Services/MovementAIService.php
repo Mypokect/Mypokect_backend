@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\SavingGoal;
 use App\Models\Tag;
 use App\Models\User;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -289,6 +290,46 @@ class MovementAIService
         Log::debug('=== DETECT LANGUAGE COMPLETED ===', ['language' => 'en', 'method' => 'default']);
 
         return 'en';
+    }
+
+    /**
+     * Transcribe an audio file using Groq Whisper API.
+     * Returns the transcribed text or empty string on failure.
+     */
+    public function transcribeWithWhisper(UploadedFile $file): string
+    {
+        try {
+            $response = Http::withHeaders([
+                'Authorization' => "Bearer {$this->apiKey}",
+            ])
+            ->timeout(30)
+            ->attach(
+                'file',
+                file_get_contents($file->getRealPath()),
+                $file->getClientOriginalName() ?: 'audio.m4a'
+            )
+            ->post('https://api.groq.com/openai/v1/audio/transcriptions', [
+                'model'           => 'whisper-large-v3-turbo',
+                'language'        => 'es',
+                'response_format' => 'json',
+            ]);
+
+            if ($response->successful()) {
+                $text = trim($response->json('text', ''));
+                Log::info('Whisper transcription success', ['preview' => substr($text, 0, 80)]);
+                return $text;
+            }
+
+            Log::warning('Whisper API error', [
+                'status' => $response->status(),
+                'body'   => substr($response->body(), 0, 200),
+            ]);
+            return '';
+
+        } catch (\Exception $e) {
+            Log::error('Whisper transcription exception', ['error' => $e->getMessage()]);
+            return '';
+        }
     }
 
     /**

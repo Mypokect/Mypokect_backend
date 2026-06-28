@@ -632,6 +632,45 @@ class MovementController extends Controller
     }
 
     /**
+     * Transcribe uploaded audio with Groq Whisper and return the text.
+     * POST /movements/transcribe
+     */
+    public function transcribeAudio(Request $request): JsonResponse
+    {
+        $request->validate([
+            'audio' => 'required|file|max:10240',
+        ]);
+
+        try {
+            $user = Auth::user();
+
+            $voiceLock = Cache::lock("voice_suggest_{$user->id}", 3);
+            if (! $voiceLock->get()) {
+                return response()->json([
+                    'status'      => 'error',
+                    'message'     => 'Espera un momento antes de intentar de nuevo.',
+                    'error_type'  => 'rate_limited',
+                    'retry_after' => 3,
+                ], 429);
+            }
+
+            $text = $this->aiService->transcribeWithWhisper($request->file('audio'));
+
+            if (empty($text)) {
+                return $this->errorResponse('No se detectó voz en el audio.', 422);
+            }
+
+            Log::info("Whisper transcription for user {$user->id}", ['text' => substr($text, 0, 80)]);
+
+            return $this->successResponse(['text' => $text]);
+
+        } catch (\Exception $e) {
+            Log::error('Error transcribing audio: ' . $e->getMessage());
+            return $this->errorResponse('Error al procesar el audio: ' . $this->safeMessage($e));
+        }
+    }
+
+    /**
      * Suggest movement from voice.
      *
      * Uses AI to parse a voice transcription and suggest movement fields (amount, tag, type, description).

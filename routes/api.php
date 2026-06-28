@@ -59,6 +59,10 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::put('/movements/{movement}', [MovementController::class, 'update']);
     Route::delete('/movements/{movement}', [MovementController::class, 'destroy']);
 
+    // Transcripción de audio con Groq Whisper (reemplaza speech_to_text del dispositivo)
+    Route::post('/movements/transcribe', [MovementController::class, 'transcribeAudio'])
+        ->middleware('throttle:30,1');
+
     // IA de Voz para Movimientos (Entiende gasto/ingreso + monto + metodo de pago)
     Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
         ->middleware('throttle:60,1');
