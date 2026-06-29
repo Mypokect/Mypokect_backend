@@ -207,14 +207,13 @@ class MovementController extends Controller
      */
     private function invalidateUserSummaryCache(int $userId): void
     {
-        // Delete up to 24 month-slots. We don't know which months are cached,
-        // so we wipe 3 months: last month, current month, next month.
         $tz = 'America/Bogota';
         foreach ([-1, 0, 1] as $offset) {
             $dt = now($tz)->addMonths($offset);
             Cache::forget("home_data:{$userId}:{$dt->year}:{$dt->month}");
             Cache::forget("fin_summary:{$userId}:{$dt->year}:{$dt->month}");
         }
+        Cache::forget("spending_profile:{$userId}");
     }
 
     private function recalculateSavingsChallenge($user): void

@@ -379,39 +379,44 @@ class BudgetController extends Controller
             $description = $request->input('description', '');
             $totalAmount = (float) $request->input('total_amount');
 
-            // ── Perfil de gasto real (últimos 90 días) ──────────────────────
-            $since = Carbon::now()->subDays(90);
+            // ── Perfil de gasto real — cacheado 1 h por usuario ────────────
+            $spendingProfile = Cache::remember(
+                "spending_profile:{$userId}",
+                3_600,
+                function () use ($userId) {
+                    $since = Carbon::now()->subDays(90);
 
-            $rawSpending = Movement::where('user_id', $userId)
-                ->where('type', 'expense')
-                ->where('created_at', '>=', $since)
-                ->with('tag:id,name')
-                ->get(['amount', 'tag_id', 'created_at']);
+                    $rows = Movement::where('user_id', $userId)
+                        ->where('type', 'expense')
+                        ->where('created_at', '>=', $since)
+                        ->with('tag:id,name')
+                        ->get(['amount', 'tag_id']);
 
-            $totalExpenses   = $rawSpending->sum(fn ($m) => (float) $m->amount);
-            $avgMonthly      = round($totalExpenses / 3, 2);
+                    $totalExpenses = $rows->sum(fn ($m) => (float) $m->amount);
 
-            $byCategory = $rawSpending
-                ->groupBy(fn ($m) => $m->tag?->name ?? 'Sin categoría')
-                ->map(fn ($group) => round($group->sum(fn ($m) => (float) $m->amount), 2))
-                ->sortDesc()
-                ->take(8);
+                    $byCategory = $rows
+                        ->groupBy(fn ($m) => $m->tag?->name ?? 'Sin categoría')
+                        ->map(fn ($g) => round($g->sum(fn ($m) => (float) $m->amount), 2))
+                        ->sortDesc()
+                        ->take(8);
 
-            $spendingProfile = [
-                'has_data'          => $rawSpending->isNotEmpty(),
-                'period_days'       => 90,
-                'total_expenses'    => $totalExpenses,
-                'avg_monthly'       => $avgMonthly,
-                'top_categories'    => $byCategory->map(function ($amount, $name) use ($totalExpenses) {
                     return [
-                        'name'       => $name,
-                        'amount'     => $amount,
-                        'percentage' => $totalExpenses > 0
-                            ? round(($amount / $totalExpenses) * 100, 1)
-                            : 0,
+                        'has_data'       => $rows->isNotEmpty(),
+                        'period_days'    => 90,
+                        'total_expenses' => $totalExpenses,
+                        'avg_monthly'    => round($totalExpenses / 3, 2),
+                        'top_categories' => $byCategory->map(function ($amount, $name) use ($totalExpenses) {
+                            return [
+                                'name'       => $name,
+                                'amount'     => $amount,
+                                'percentage' => $totalExpenses > 0
+                                    ? round(($amount / $totalExpenses) * 100, 1)
+                                    : 0,
+                            ];
+                        })->values()->toArray(),
                     ];
-                })->values()->toArray(),
-            ];
+                }
+            );
 
             Log::info('SmartBudget: spending profile built', [
                 'has_data'   => $spendingProfile['has_data'],
