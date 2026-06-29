@@ -40,8 +40,12 @@ class SavingsController extends Controller
             $user = Auth::user();
             $valorAhorroDeseado = (float) ($request->query('valor_ahorro_deseado') ?? 0);
 
-            $startOfMonth = Carbon::now()->startOfMonth();
-            $endOfMonth = Carbon::now()->endOfMonth();
+            // Always query with Colombia timezone so month boundaries match the user's clock.
+            // Movements are stored in UTC, so we convert the boundaries to UTC for the query.
+            $tz           = 'America/Bogota';
+            $now          = Carbon::now($tz);
+            $startOfMonth = $now->copy()->startOfMonth()->utc();
+            $endOfMonth   = $now->copy()->endOfMonth()->utc();
 
             $incomes = (float) ($user->movements()
                 ->where('type', 'income')
@@ -56,8 +60,7 @@ class SavingsController extends Controller
             $disponible = $incomes - $expenses;
             $gastoPromedioDiario = $expenses > 0 ? round($expenses / 30, 2) : 0.0;
 
-            // Days of current month for countdown
-            $now              = Carbon::now();
+            // Days of current month for countdown (use Colombia time for display)
             $diaActual        = $now->day;
             $diasDelMes       = $now->daysInMonth;
             $diasRestantesMes = $diasDelMes - $diaActual + 1;
@@ -324,9 +327,14 @@ class SavingsController extends Controller
         $monto = round((float) $request->monto, 2);
         $user = Auth::user();
 
+        $tzBogota   = 'America/Bogota';
+        $nowBogota  = Carbon::now($tzBogota);
+        $startMonth = $nowBogota->copy()->startOfMonth()->utc();
+        $endMonth   = $nowBogota->copy()->endOfMonth()->utc();
+
         $incomesMes = (float) ($user->movements()
             ->where('type', 'income')
-            ->whereBetween('created_at', [now()->startOfMonth(), now()->endOfMonth()])
+            ->whereBetween('created_at', [$startMonth, $endMonth])
             ->sum('amount') ?? 0.0);
 
         $pct = ($incomesMes > 0 && $monto > 0)
