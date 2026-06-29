@@ -57,7 +57,7 @@ class BudgetAIService
     /**
      * Core AI Generation Logic
      */
-    public function generateBudgetWithAI(string $title, float $amount, string $description, array $userTags = []): array
+    public function generateBudgetWithAI(string $title, float $amount, string $description, array $userTags = [], array $spendingProfile = []): array
     {
         if (GroqCircuitBreaker::isOpen()) {
             Log::debug('BudgetAIService circuit breaker active — skipping AI generation');
@@ -67,7 +67,10 @@ class BudgetAIService
 
         // Cache by hash of all inputs (tags included for per-user correctness).
         // TTL 1h — shorter than voice commands since budget amounts change more often.
-        $cacheKey = 'budget_ai:'.md5($title.'|'.$amount.'|'.$description.'|'.implode(',', $userTags));
+        $spendingHash = ! empty($spendingProfile['top_categories'])
+            ? md5(json_encode($spendingProfile['top_categories']))
+            : 'no-history';
+        $cacheKey = 'budget_ai:'.md5($title.'|'.$amount.'|'.$description.'|'.implode(',', $userTags).'|'.$spendingHash);
         $cached = Cache::get($cacheKey);
         if ($cached !== null) {
             Log::info('generateBudgetWithAI: cache hit', ['key' => $cacheKey]);
@@ -95,6 +98,32 @@ class BudgetAIService
             ? ''
             : ', "suggested_tags": ["tag1"]';
 
+        // ── Bloque de historial real del usuario ────────────────────────────
+        $historyBlock = '';
+        if (! empty($spendingProfile['has_data']) && ! empty($spendingProfile['top_categories'])) {
+            $lines = [];
+            foreach ($spendingProfile['top_categories'] as $cat) {
+                $lines[] = "  * {$cat['name']}: {$cat['percentage']}% (\${$cat['amount']} COP / 90 days)";
+            }
+            $categoriesText = implode("\n", $lines);
+            $avgMonthly     = number_format($spendingProfile['avg_monthly'], 0, '.', ',');
+            $historyBlock   = <<<HISTORY
+
+        REAL USER SPENDING HISTORY (last 90 days — use this as primary signal):
+        - Average monthly expenses: \${$avgMonthly} COP
+        - Breakdown by real category:
+        {$categoriesText}
+        - IMPORTANT: Prioritize these proportions when distributing the budget.
+          Adjust only when the plan type clearly requires different allocation.
+        HISTORY;
+        } else {
+            $historyBlock = "\n        USER SPENDING HISTORY: No data available — use general Latin American spending patterns.\n";
+        }
+
+        $descriptionLine = ! empty($description)
+            ? "- description: \"$description\""
+            : '- description: (not provided — use spending history as primary context)';
+
         $mappingHint = FinancialMappingEngine::getPromptHint();
 
         $prompt = <<<PROMPT
@@ -102,10 +131,10 @@ class BudgetAIService
 
         TASK:
         Generate a realistic budget distribution for a "$planType" plan.
-
+        {$historyBlock}
         INPUT:
         - title: "$title"
-        - description: "$description"
+        {$descriptionLine}
         - total_amount: $amount
 
         CATEGORY NAMING RULES (follow exactly):
@@ -121,7 +150,8 @@ class BudgetAIService
         - Detect the user's language from the title/description and write all text values in that language.
         - Generate between 3 and 7 categories.
         - Category amounts MUST sum EXACTLY to $amount.
-        - Use realistic spending proportions based on the actual type of event or plan.
+        - If real spending history is provided, use those proportions as the base distribution.
+        - Adjust proportions only if the plan type clearly requires a different allocation.
         - NEVER split amounts evenly unless it is genuinely realistic.
         - NEVER use "Otros" or "Other" as a category — always map to a specific named category.
         - Each category must have:

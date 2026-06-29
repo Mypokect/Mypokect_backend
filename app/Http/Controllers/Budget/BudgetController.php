@@ -365,44 +365,82 @@ class BudgetController extends Controller
 
         try {
             $validated = Validator::make($request->all(), [
-                'title' => 'required|string|max:255',
-                'description' => 'required|string|max:2000',
+                'title'        => 'required|string|max:255',
+                'description'  => 'nullable|string|max:2000',
                 'total_amount' => 'required|numeric|min:0.01',
             ]);
 
             if ($validated->fails()) {
-                Log::warning('SmartBudget: AI Input Validation failed.', $validated->errors()->toArray());
-
                 return $this->validationErrorResponse($validated->errors());
             }
 
-            $title = $request->input('title');
-            $description = $request->input('description');
+            $userId      = Auth::id();
+            $title       = $request->input('title');
+            $description = $request->input('description', '');
             $totalAmount = (float) $request->input('total_amount');
 
-            $userTags = Tag::where('user_id', Auth::id())->pluck('name')->toArray();
+            // ── Perfil de gasto real (últimos 90 días) ──────────────────────
+            $since = Carbon::now()->subDays(90);
 
-            Log::info('SmartBudget: Calling AI Service...', ['user_tags_count' => count($userTags)]);
-            $aiResult = $this->aiService->generateBudgetWithAI($title, $totalAmount, $description, $userTags);
+            $rawSpending = Movement::where('user_id', $userId)
+                ->where('type', 'expense')
+                ->where('created_at', '>=', $since)
+                ->with('tag:id,name')
+                ->get(['amount', 'tag_id', 'created_at']);
+
+            $totalExpenses   = $rawSpending->sum(fn ($m) => (float) $m->amount);
+            $avgMonthly      = round($totalExpenses / 3, 2);
+
+            $byCategory = $rawSpending
+                ->groupBy(fn ($m) => $m->tag?->name ?? 'Sin categoría')
+                ->map(fn ($group) => round($group->sum(fn ($m) => (float) $m->amount), 2))
+                ->sortDesc()
+                ->take(8);
+
+            $spendingProfile = [
+                'has_data'          => $rawSpending->isNotEmpty(),
+                'period_days'       => 90,
+                'total_expenses'    => $totalExpenses,
+                'avg_monthly'       => $avgMonthly,
+                'top_categories'    => $byCategory->map(function ($amount, $name) use ($totalExpenses) {
+                    return [
+                        'name'       => $name,
+                        'amount'     => $amount,
+                        'percentage' => $totalExpenses > 0
+                            ? round(($amount / $totalExpenses) * 100, 1)
+                            : 0,
+                    ];
+                })->values()->toArray(),
+            ];
+
+            Log::info('SmartBudget: spending profile built', [
+                'has_data'   => $spendingProfile['has_data'],
+                'categories' => count($spendingProfile['top_categories']),
+            ]);
+
+            $userTags = Tag::where('user_id', $userId)->pluck('name')->toArray();
+
+            $aiResult = $this->aiService->generateBudgetWithAI(
+                $title, $totalAmount, $description, $userTags, $spendingProfile
+            );
 
             if (! $aiResult['success']) {
-                Log::error('SmartBudget: AI Service failed to return success.');
                 throw new \Exception('Failed to generate AI suggestions');
             }
 
-            Log::info('SmartBudget: AI Service returned success. Parsing data.');
             $budgetData = $aiResult['data'];
 
             return $this->successResponse([
-                'title' => $title,
-                'description' => $description,
-                'total_amount' => $totalAmount,
-                'categories' => $budgetData['categories'] ?? [],
-                'general_advice' => $budgetData['general_advice'] ?? '',
+                'title'            => $title,
+                'description'      => $description,
+                'total_amount'     => $totalAmount,
+                'categories'       => $budgetData['categories'] ?? [],
+                'general_advice'   => $budgetData['general_advice'] ?? '',
                 'suggested_period' => $budgetData['suggested_period'] ?? 'monthly',
-                'duration_days' => $budgetData['duration_days'] ?? 30,
-                'language' => $aiResult['language'],
-                'plan_type' => $aiResult['plan_type'],
+                'duration_days'    => $budgetData['duration_days'] ?? 30,
+                'language'         => $aiResult['language'],
+                'plan_type'        => $aiResult['plan_type'],
+                'based_on_history' => $spendingProfile['has_data'],
             ], 'AI suggestions generated. Review and save as budget.');
 
         } catch (\Exception $e) {
