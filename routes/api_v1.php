@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\CheckoutController;
 use App\Http\Controllers\Api\V1\SubscriptionController;
 use Illuminate\Support\Facades\Route;
 
@@ -26,6 +27,9 @@ Route::get('/plans', [SubscriptionController::class, 'plans']);
 Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Estado de suscripción — fuente de verdad para gating en todos los clientes
     Route::get('/subscription/status', [SubscriptionController::class, 'status']);
+
+    // Inicia el checkout de Wompi (web + Flutter usan el mismo endpoint)
+    Route::post('/subscription/checkout', [CheckoutController::class, 'create']);
 
     // Ejemplo de ruta premium (gated). Descomentar cuando exista el endpoint:
     // Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])

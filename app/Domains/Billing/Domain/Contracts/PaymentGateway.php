@@ -9,9 +9,8 @@ use Illuminate\Http\Request;
 /**
  * Puerto (hexagonal) que abstrae cualquier pasarela de pago.
  *
- * Adapters concretos viven en App\Domains\Billing\Infrastructure\Gateways:
- *   - NequiGateway
- *   - MercadoPagoGateway
+ * Adapter concreto en App\Domains\Billing\Infrastructure\Gateways:
+ *   - WompiGateway (Bancolombia) — pasarela única del SaaS.
  *
  * La lógica de negocio (activar/renovar suscripción) NO depende de qué gateway
  * se use: solo conoce este contrato.

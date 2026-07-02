@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Domains\Billing\Domain\Contracts\PaymentGateway;
+use App\Domains\Billing\Infrastructure\Gateways\WompiGateway;
 use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\SecurityScheme;
@@ -26,7 +28,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Pasarela de pago única: Wompi (puerto hexagonal -> adapter concreto).
+        $this->app->bind(PaymentGateway::class, WompiGateway::class);
     }
 
     /**

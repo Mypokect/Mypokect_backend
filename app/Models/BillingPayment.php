@@ -18,7 +18,7 @@ class BillingPayment extends Model
     protected $table = 'billing_payments';
 
     protected $fillable = [
-        'user_id', 'subscription_id', 'plan_id', 'gateway', 'gateway_payment_id',
+        'user_id', 'subscription_id', 'plan_id', 'gateway', 'gateway_payment_id', 'reference',
         'amount_cents', 'currency', 'status', 'method', 'paid_at', 'raw_response',
     ];
 

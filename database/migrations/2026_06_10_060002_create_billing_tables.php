@@ -41,8 +41,8 @@ return new class extends Migration
             $table->foreignId('plan_id')->constrained();
             $table->enum('status', ['trialing', 'active', 'past_due', 'canceled', 'expired', 'paused'])
                 ->default('trialing');
-            $table->enum('gateway', ['nequi', 'mercadopago', 'manual'])->nullable();
-            $table->string('gateway_subscription_id')->nullable();
+            $table->enum('gateway', ['wompi', 'manual'])->nullable();
+            $table->string('gateway_subscription_id')->nullable(); // Wompi: payment_source_id (auto-renovación)
             $table->dateTime('current_period_start')->nullable();
             $table->dateTime('current_period_end')->nullable();
             $table->dateTime('trial_ends_at')->nullable();
@@ -64,13 +64,14 @@ return new class extends Migration
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->foreignId('subscription_id')->nullable()->constrained()->nullOnDelete();
             $table->foreignId('plan_id')->nullable()->constrained()->nullOnDelete();
-            $table->enum('gateway', ['nequi', 'mercadopago', 'manual']);
-            $table->string('gateway_payment_id')->nullable();
+            $table->enum('gateway', ['wompi', 'manual']);
+            $table->string('gateway_payment_id')->nullable();   // id de la transacción en Wompi
+            $table->string('reference')->nullable();            // referencia única enviada al checkout (mapea webhook -> pago)
             $table->unsignedBigInteger('amount_cents');
             $table->char('currency', 3)->default('COP');
             $table->enum('status', ['pending', 'approved', 'rejected', 'refunded', 'charged_back'])
                 ->default('pending');
-            $table->enum('method', ['nequi', 'pse', 'card', 'cash'])->nullable();
+            $table->enum('method', ['card', 'pse', 'nequi', 'bancolombia_transfer', 'bancolombia_qr', 'daviplata', 'cash'])->nullable();
             $table->dateTime('paid_at')->nullable();
             $table->json('raw_response')->nullable();
             $table->timestamps();
@@ -79,6 +80,7 @@ return new class extends Migration
             $table->unique(['gateway', 'gateway_payment_id']);
             $table->index(['user_id', 'status']);
             $table->index('subscription_id');
+            $table->index('reference');
         });
 
         // LIBRO MAYOR DE BILLING (append-only) — NO confundir con movements del usuario
@@ -97,8 +99,8 @@ return new class extends Migration
         Schema::create('payment_methods', function (Blueprint $table) {
             $table->id();
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
-            $table->enum('gateway', ['nequi', 'mercadopago', 'manual']);
-            $table->enum('type', ['nequi', 'card', 'pse']);
+            $table->enum('gateway', ['wompi', 'manual']);
+            $table->enum('type', ['card', 'nequi']);      // fuentes de pago tokenizables en Wompi
             $table->text('token')->nullable();           // cifrado vía cast 'encrypted'
             $table->string('brand')->nullable();
             $table->string('last_four', 4)->nullable();

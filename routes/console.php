@@ -13,3 +13,8 @@ Schedule::command('reminders:process-notifications')
     ->everyFifteenMinutes()
     ->withoutOverlapping()
     ->runInBackground();
+
+// Renovación de suscripciones (auto-cobro tarjeta/Nequi + expiración del resto)
+Schedule::command('subscriptions:renew')
+    ->dailyAt('03:00')
+    ->withoutOverlapping();

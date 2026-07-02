@@ -64,7 +64,7 @@ class SubscriptionTest extends TestCase
         $plan = $this->proAnnualPlan();
         Subscription::create([
             'user_id' => $user->id, 'plan_id' => $plan->id, 'status' => 'trialing',
-            'gateway' => 'mercadopago', 'current_period_start' => now(),
+            'gateway' => 'wompi', 'current_period_start' => now(),
             'current_period_end' => now()->addYear(), 'trial_ends_at' => now()->addDays(14),
         ]);
 
@@ -112,14 +112,19 @@ class SubscriptionTest extends TestCase
         $response->assertOk()->assertJsonPath('ok', true);
     }
 
-    public function test_webhook_endpoint_logs_and_is_idempotent(): void
+    public function test_webhook_logs_unsigned_event_as_ignored(): void
     {
-        $payload = ['id' => 'pay_123', 'type' => 'payment', 'action' => 'payment.created'];
+        // Evento sin checksum válido: se registra para auditoría pero NO se procesa.
+        $payload = [
+            'event' => 'transaction.updated',
+            'data'  => ['transaction' => ['id' => 'wtx_123', 'status' => 'APPROVED']],
+        ];
 
-        $this->postJson('/api/webhooks/mercadopago', $payload)->assertOk();
+        $this->postJson('/api/webhooks/wompi', $payload)->assertOk();
 
         $this->assertDatabaseHas('webhook_logs', [
-            'gateway' => 'mercadopago', 'external_id' => 'pay_123', 'status' => 'received',
+            'gateway' => 'wompi', 'external_id' => 'wtx_123',
+            'signature_valid' => false, 'status' => 'ignored',
         ]);
 
         $this->postJson('/api/webhooks/unknowngw', $payload)->assertStatus(404);

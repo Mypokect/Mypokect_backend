@@ -1,33 +1,37 @@
 <?php
 
+use App\Domains\Billing\Domain\Contracts\PaymentGateway;
+use App\Jobs\ProcessWompiWebhookJob;
 use App\Models\WebhookLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
-| Webhooks de pasarelas de pago
+| Webhooks de pasarelas de pago (Wompi)
 |--------------------------------------------------------------------------
 | Prefijo: /api  (sin auth de usuario — se valida la FIRMA del proveedor)
 |
-| Patrón obligatorio:
-|  1. Verificar firma del gateway (en el adapter correspondiente).
-|  2. Idempotencia por (gateway, external_id): no procesar dos veces.
-|  3. Encolar el procesamiento real (ProcessWebhookJob) y responder 200 rápido.
+| Patrón:
+|  1. Verificar la firma (checksum) del evento en el adapter WompiGateway.
+|  2. Registrar SIEMPRE el evento (auditoría), marcando signature_valid.
+|  3. Idempotencia por (gateway, external_id): no procesar dos veces.
+|  4. Encolar el procesamiento real (ProcessWompiWebhookJob) y responder 200 rápido.
 |
-| Esqueleto F0: registra el webhook y responde 200. La activación de la
-| suscripción se implementa en F3/F4 con los adapters reales.
+| Wompi reintenta si no recibe 2xx, por eso respondemos 200 incluso ante
+| firmas inválidas (se registran como no procesables, no se actúa sobre ellas).
 */
 
-Route::post('/webhooks/{gateway}', function (string $gateway, Request $request) {
-    $allowed = ['nequi', 'mercadopago'];
-    if (! in_array($gateway, $allowed, true)) {
+Route::post('/webhooks/{gateway}', function (string $gateway, Request $request, PaymentGateway $paymentGateway) {
+    if ($gateway !== 'wompi') {
         return response()->json(['error' => 'unknown_gateway'], 404);
     }
 
-    // Idempotencia básica (el external_id real lo extrae el adapter en F3/F4).
-    $externalId = $request->input('id') ?? $request->input('data.id') ?? null;
+    // El id de la transacción de Wompi viaja en data.transaction.id
+    $externalId = $request->input('data.transaction.id') ?? $request->input('data.id') ?? null;
+    $eventType = $request->input('event'); // p.ej. "transaction.updated"
 
+    // Idempotencia: si ya procesamos este evento, no repetir.
     if ($externalId) {
         $already = WebhookLog::where('gateway', $gateway)
             ->where('external_id', $externalId)
@@ -38,16 +42,30 @@ Route::post('/webhooks/{gateway}', function (string $gateway, Request $request) 
         }
     }
 
-    WebhookLog::create([
+    // Verifica la firma del evento (checksum). No lanza: devuelve el flag.
+    $signatureValid = false;
+    try {
+        $event = $paymentGateway->verifyWebhook($request);
+        $signatureValid = $event->signatureValid;
+    } catch (\Throwable $e) {
+        $signatureValid = false;
+    }
+
+    $log = WebhookLog::create([
         'gateway'         => $gateway,
-        'event_type'      => $request->input('type') ?? $request->input('action'),
+        'event_type'      => $eventType,
         'external_id'     => $externalId,
-        'signature_valid' => false, // se valida en el adapter (F3/F4)
+        'signature_valid' => $signatureValid,
         'payload'         => $request->all(),
         'status'          => 'received',
     ]);
 
-    // TODO F3/F4: ProcessWebhookJob::dispatch($gateway, $request->all());
+    // Solo encolamos el procesamiento si la firma es válida.
+    if ($signatureValid) {
+        ProcessWompiWebhookJob::dispatch($log->id);
+    } else {
+        $log->update(['status' => 'ignored', 'error' => 'invalid_or_missing_signature']);
+    }
 
     return response()->json(['ok' => true]);
 })->middleware('throttle:120,1');

@@ -43,4 +43,21 @@ return [
         'server_key' => env('FCM_SERVER_KEY'),
     ],
 
+    /*
+    | Wompi (Bancolombia) — pasarela de pago única del SaaS.
+    | Llaves del panel de comercio: https://comercios.wompi.co
+    | - public_key  (pub_test_* / pub_prod_*)   : firma del checkout y tokenización
+    | - private_key (prv_test_* / prv_prod_*)    : SOLO servidor (transacciones, fuentes de pago)
+    | - integrity_secret                         : firma de integridad del Web Checkout
+    | - events_secret                            : checksum de validación de webhooks
+    */
+    'wompi' => [
+        'public_key'       => env('WOMPI_PUBLIC_KEY'),
+        'private_key'      => env('WOMPI_PRIVATE_KEY'),
+        'integrity_secret' => env('WOMPI_INTEGRITY_SECRET'),
+        'events_secret'    => env('WOMPI_EVENTS_SECRET'),
+        'environment'      => env('WOMPI_ENV', 'sandbox'), // sandbox | production
+        'redirect_url'     => env('WOMPI_REDIRECT_URL', 'http://localhost:5173/suscripcion/gracias'),
+    ],
+
 ];
