@@ -18,3 +18,8 @@ Schedule::command('reminders:process-notifications')
 Schedule::command('subscriptions:renew')
     ->dailyAt('03:00')
     ->withoutOverlapping();
+
+// Aviso a usuarios cuya suscripción/prueba está por vencer (3 días antes)
+Schedule::command('subscriptions:remind')
+    ->dailyAt('09:00')
+    ->withoutOverlapping();

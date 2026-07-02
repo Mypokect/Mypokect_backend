@@ -36,8 +36,9 @@ class RenewSubscriptions extends Command
         $this->info("Suscripciones vencidas a procesar: {$due->count()}");
 
         foreach ($due as $subscription) {
-            // Auto-renovación solo si hay fuente de pago tokenizada y el adapter es Wompi.
-            if ($subscription->gateway_subscription_id && $gateway instanceof WompiGateway) {
+            // Auto-renovación solo si el usuario dejó activado el débito automático,
+            // hay fuente de pago tokenizada y el adapter es Wompi.
+            if ($subscription->auto_renew && $subscription->gateway_subscription_id && $gateway instanceof WompiGateway) {
                 $this->autoRenew($subscription, $gateway, $manager);
 
                 continue;

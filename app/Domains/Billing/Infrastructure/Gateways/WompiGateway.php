@@ -143,6 +143,65 @@ class WompiGateway implements PaymentGateway
         return (string) $response->json('data.presigned_acceptance.acceptance_token');
     }
 
+    /**
+     * Tokens de aceptación + permalinks (T&C y autorización de datos) para
+     * mostrarlos al usuario antes de guardar una fuente de pago.
+     */
+    public function getAcceptance(): array
+    {
+        $config = $this->config();
+        $data = (array) $this->client()
+            ->get($this->apiBase().'/merchants/'.$config['public_key'])
+            ->json('data', []);
+
+        return [
+            'acceptance' => $data['presigned_acceptance'] ?? null,
+            'personal_data_auth' => $data['presigned_personal_data_auth'] ?? null,
+        ];
+    }
+
+    /**
+     * Flujo de débito automático: crea una fuente de pago reutilizable a partir
+     * de un token tokenizado en el cliente, registra el BillingPayment pendiente
+     * y ejecuta el primer cobro (recurrente). El resultado se concilia con
+     * SubscriptionManager (síncrono si Wompi resuelve al instante; si queda
+     * PENDING, lo cierra el webhook).
+     *
+     * @return array{reference:string, payment_source_id:int, source:array, transaction:array}
+     */
+    public function chargeWithToken(Subscription $subscription, Plan $plan, string $type, string $token, string $email): array
+    {
+        $source = $this->createPaymentSource($type, $token, $email);
+        $sourceId = (int) ($source['id'] ?? 0);
+
+        if ($sourceId <= 0) {
+            throw new RuntimeException('No se pudo crear la fuente de pago en Wompi.');
+        }
+
+        $amountInCents = (int) $plan->price_cents;
+        $reference = $this->buildReference($subscription, $plan);
+
+        BillingPayment::create([
+            'user_id' => $subscription->user_id,
+            'subscription_id' => $subscription->id,
+            'plan_id' => $plan->id,
+            'gateway' => 'wompi',
+            'reference' => $reference,
+            'amount_cents' => $amountInCents,
+            'currency' => 'COP',
+            'status' => 'pending',
+        ]);
+
+        $tx = $this->chargePaymentSource($sourceId, $amountInCents, $reference, $email);
+
+        return [
+            'reference' => $reference,
+            'payment_source_id' => $sourceId,
+            'source' => $source,
+            'transaction' => $tx,
+        ];
+    }
+
     /** Crea una fuente de pago reutilizable a partir de un token tokenizado. */
     public function createPaymentSource(string $type, string $token, string $email): array
     {

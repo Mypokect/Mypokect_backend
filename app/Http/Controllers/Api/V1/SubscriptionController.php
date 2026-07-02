@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\PaymentMethod;
 use App\Models\Plan;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,7 +18,14 @@ class SubscriptionController extends Controller
     /** Estado de la suscripción del usuario autenticado. */
     public function status(Request $request): JsonResponse
     {
-        $sub = $request->user()->activeSubscription;
+        $user = $request->user();
+        $sub = $user->activeSubscription;
+
+        $daysUntilRenewal = $sub?->current_period_end
+            ? max(0, (int) ceil(now()->floatDiffInDays($sub->current_period_end, false)))
+            : null;
+
+        $pm = PaymentMethod::where('user_id', $user->id)->where('is_default', true)->first();
 
         return response()->json([
             'data' => [
@@ -27,6 +35,13 @@ class SubscriptionController extends Controller
                 'period_end' => $sub?->current_period_end,
                 'trial_ends_at' => $sub?->trial_ends_at,
                 'is_premium' => (bool) $sub?->isPremium(),
+                'auto_renew' => (bool) ($sub?->auto_renew ?? false),
+                'days_until_renewal' => $daysUntilRenewal,
+                'payment_method' => $pm ? [
+                    'brand' => $pm->brand,
+                    'last_four' => $pm->last_four,
+                    'type' => $pm->type,
+                ] : null,
             ],
         ]);
     }

@@ -15,15 +15,17 @@ class Subscription extends Model
 
     protected $fillable = [
         'user_id', 'plan_id', 'status', 'gateway', 'gateway_subscription_id',
-        'current_period_start', 'current_period_end', 'trial_ends_at',
-        'grace_ends_at', 'canceled_at', 'cancel_at_period_end',
+        'auto_renew', 'current_period_start', 'current_period_end', 'trial_ends_at',
+        'grace_ends_at', 'renewal_reminded_at', 'canceled_at', 'cancel_at_period_end',
     ];
 
     protected $casts = [
+        'auto_renew'           => 'boolean',
         'current_period_start' => 'datetime',
         'current_period_end'   => 'datetime',
         'trial_ends_at'        => 'datetime',
         'grace_ends_at'        => 'datetime',
+        'renewal_reminded_at'  => 'datetime',
         'canceled_at'          => 'datetime',
         'cancel_at_period_end' => 'boolean',
     ];

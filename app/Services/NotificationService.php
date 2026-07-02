@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\NotificationToken;
 use App\Models\Reminder;
+use App\Models\User;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -41,6 +42,51 @@ class NotificationService
         $notification = $this->buildNotificationPayload($reminder, $type);
         
         return $this->sendToTokens($tokens, $notification, $reminder);
+    }
+
+    /**
+     * Envía una notificación push genérica a un usuario (no ligada a un
+     * recordatorio). La usan los avisos de suscripción por vencer.
+     *
+     * @return array{success:int, failure:int}
+     */
+    public function sendToUser(User $user, string $title, string $body, array $data = []): array
+    {
+        $tokens = NotificationToken::where('user_id', $user->id)->pluck('token')->toArray();
+
+        if (empty($tokens)) {
+            return ['success' => 0, 'failure' => 0];
+        }
+
+        $payload = [
+            'registration_ids' => $tokens,
+            'notification' => ['title' => $title, 'body' => $body, 'sound' => 'default'],
+            'data' => array_merge(['type' => 'general'], $data),
+            'priority' => 'high',
+            'content_available' => true,
+        ];
+
+        try {
+            $response = Http::withHeaders([
+                'Authorization' => "key={$this->fcmServerKey}",
+                'Content-Type' => 'application/json',
+            ])->post($this->fcmUrl, $payload);
+
+            if ($response->successful()) {
+                $result = $response->json();
+                $this->removeInvalidTokens($result['results'] ?? [], $tokens);
+
+                return ['success' => $result['success'] ?? 0, 'failure' => $result['failure'] ?? 0];
+            }
+
+            Log::error('FCM sendToUser request failed', ['status' => $response->status()]);
+
+            return ['success' => 0, 'failure' => count($tokens)];
+        } catch (\Exception $e) {
+            Log::error('FCM sendToUser exception', ['error' => $e->getMessage()]);
+
+            return ['success' => 0, 'failure' => count($tokens)];
+        }
     }
 
     /**

@@ -5,6 +5,9 @@ namespace App\Services\Billing;
 use App\Models\BillingPayment;
 use App\Models\BillingTransaction;
 use App\Models\Invoice;
+use App\Models\Plan;
+use App\Models\Subscription;
+use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -28,6 +31,45 @@ class SubscriptionManager
         'CASH' => 'cash',
         'CORRESPONSAL' => 'cash',
     ];
+
+    /**
+     * Inicia la prueba gratuita al registrarse un usuario.
+     *
+     * Crea una suscripción `trialing` sobre el plan Pro mensual con la ventana de
+     * `trial_days` del plan (por defecto 14). Durante la prueba `isPremium()` es
+     * true, así el usuario usa la app; al vencer debe pagar (gating "Solo Pro").
+     * Idempotente: si el usuario ya tiene una suscripción, no crea otra.
+     */
+    public function startTrial(User $user, string $planCode = 'pro_monthly'): ?Subscription
+    {
+        if ($user->subscriptions()->exists()) {
+            return $user->activeSubscription;
+        }
+
+        $plan = Plan::where('code', $planCode)->where('is_active', true)->first()
+            ?? Plan::where('interval', '!=', 'none')->where('is_active', true)->orderBy('sort_order')->first();
+
+        if (! $plan) {
+            Log::warning('startTrial: no hay plan de pago activo para iniciar la prueba.', ['user_id' => $user->id]);
+
+            return null;
+        }
+
+        $days = (int) ($plan->trial_days ?: 14);
+        $start = Carbon::now();
+        $end = $start->copy()->addDays($days);
+
+        return Subscription::create([
+            'user_id' => $user->id,
+            'plan_id' => $plan->id,
+            'status' => 'trialing',
+            'gateway' => 'wompi',
+            'auto_renew' => true,
+            'current_period_start' => $start,
+            'current_period_end' => $end,
+            'trial_ends_at' => $end,
+        ]);
+    }
 
     /**
      * Procesa el payload de un evento transaction.updated de Wompi.

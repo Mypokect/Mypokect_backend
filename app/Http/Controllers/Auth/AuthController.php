@@ -6,6 +6,7 @@ use App\Helpers\SchemaCache;
 use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\User;
+use App\Services\Billing\SubscriptionManager;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -90,6 +91,14 @@ class AuthController extends Controller
                 'country_code' => $request->input('country_code'),
                 'password' => Hash::make($request->input('password')),
             ]);
+
+            // Prueba gratuita (14 días) para que el usuario use la app desde el
+            // primer momento. No debe romper el registro si algo falla.
+            try {
+                app(SubscriptionManager::class)->startTrial($user);
+            } catch (\Throwable $e) {
+                Log::warning('No se pudo iniciar la prueba al registrar', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+            }
 
             $token = $user->createToken('auth_token')->plainTextToken;
 

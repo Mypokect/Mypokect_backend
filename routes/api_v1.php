@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\CheckoutController;
+use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Controllers\Api\V1\SubscriptionController;
 use Illuminate\Support\Facades\Route;
 
@@ -28,10 +29,15 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Estado de suscripción — fuente de verdad para gating en todos los clientes
     Route::get('/subscription/status', [SubscriptionController::class, 'status']);
 
-    // Inicia el checkout de Wompi (web + Flutter usan el mismo endpoint)
+    // Checkout hosted de Wompi (fallback: PSE / Nequi / redirección)
     Route::post('/subscription/checkout', [CheckoutController::class, 'create']);
 
-    // Ejemplo de ruta premium (gated). Descomentar cuando exista el endpoint:
-    // Route::post('/movements/sugerir-voz', [MovementController::class, 'suggestFromVoice'])
-    //     ->middleware('subscription.active');
+    // Débito automático (tarjeta guardada / tokenización)
+    Route::get('/subscription/acceptance', [PaymentController::class, 'acceptance']);
+    Route::post('/subscription/pay-with-card', [PaymentController::class, 'payWithCard']);
+    Route::post('/subscription/auto-renew', [PaymentController::class, 'autoRenew']);
+
+    // Método de pago guardado (para "Visa ****1234" y su eliminación)
+    Route::get('/payment-method', [PaymentController::class, 'paymentMethod']);
+    Route::delete('/payment-method', [PaymentController::class, 'destroyPaymentMethod']);
 });
