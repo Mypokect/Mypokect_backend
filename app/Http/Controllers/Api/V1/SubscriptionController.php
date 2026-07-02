@@ -31,6 +31,7 @@ class SubscriptionController extends Controller
             'data' => [
                 'status'     => $sub?->status ?? 'none',
                 'plan'       => $sub?->plan?->code,
+                'plan_name'  => $sub?->plan?->name,
                 'gateway'    => $sub?->gateway,
                 'period_end' => $sub?->current_period_end,
                 'trial_ends_at' => $sub?->trial_ends_at,
