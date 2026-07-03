@@ -29,6 +29,9 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Estado de suscripción — fuente de verdad para gating en todos los clientes
     Route::get('/subscription/status', [SubscriptionController::class, 'status']);
 
+    // Prueba gratis de 14 días (una vez por usuario; el registro la crea solo)
+    Route::post('/subscription/start-trial', [SubscriptionController::class, 'startTrial'])->middleware('throttle:5,1');
+
     // Checkout hosted de Wompi (fallback: PSE / Nequi / redirección)
     Route::post('/subscription/checkout', [CheckoutController::class, 'create']);
 

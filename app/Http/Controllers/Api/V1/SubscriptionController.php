@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\PaymentMethod;
 use App\Models\Plan;
+use App\Services\Billing\SubscriptionManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -30,6 +31,8 @@ class SubscriptionController extends Controller
         return response()->json([
             'data' => [
                 'status'     => $sub?->status ?? 'none',
+                // ¿Puede activar la prueba gratis? (nunca ha tenido suscripción)
+                'trial_available' => ! $sub && $user->subscriptions()->doesntExist(),
                 'plan'       => $sub?->plan?->code,
                 'plan_name'  => $sub?->plan?->name,
                 'gateway'    => $sub?->gateway,
@@ -45,6 +48,34 @@ class SubscriptionController extends Controller
                 ] : null,
             ],
         ]);
+    }
+
+    /**
+     * Activa la prueba gratis de 14 días (una sola vez por usuario).
+     * El registro ya la crea automáticamente; esto cubre cuentas anteriores
+     * al lanzamiento del trial (CTA "Comenzar mis 14 días gratis" del front).
+     */
+    public function startTrial(Request $request, SubscriptionManager $manager): JsonResponse
+    {
+        $user = $request->user();
+
+        if ($user->subscriptions()->exists()) {
+            return response()->json(['message' => 'Ya usaste tu prueba gratis. Elige un plan para continuar.'], 422);
+        }
+
+        $sub = $manager->startTrial($user);
+
+        if (! $sub) {
+            return response()->json(['message' => 'No pudimos activar tu prueba. Intenta de nuevo.'], 500);
+        }
+
+        return response()->json([
+            'data' => [
+                'status'        => $sub->status,
+                'trial_ends_at' => $sub->trial_ends_at,
+                'is_premium'    => (bool) $sub->isPremium(),
+            ],
+        ], 201);
     }
 
     /** Catálogo público de planes activos (para pricing / checkout). */
