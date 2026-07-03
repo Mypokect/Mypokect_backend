@@ -64,9 +64,15 @@ class WompiGateway implements PaymentGateway
             'currency' => $currency,
             'amount-in-cents' => $amountInCents,
             'reference' => $reference,
-            'redirect-url' => $config['redirect_url'],
             'signature:integrity' => $signature,
         ];
+
+        // El WAF de Wompi (CloudFront) BLOQUEA con 403 los redirect-url hacia
+        // localhost o IPs privadas. En dev se omite: el usuario ve el recibo en
+        // Wompi y el estado se reconcilia por API en /subscription/status.
+        if (! empty($config['redirect_url']) && ! self::isPrivateUrl($config['redirect_url'])) {
+            $query['redirect-url'] = $config['redirect_url'];
+        }
 
         // Email del comprador (opcional: auth es por teléfono). Si falta, Wompi lo pide.
         if ($email = $subscription->user?->email) {
@@ -129,6 +135,30 @@ class WompiGateway implements PaymentGateway
         $status = $response->json('data.status', 'PENDING');
 
         return self::STATUS_MAP[$status] ?? 'pending';
+    }
+
+    /**
+     * Busca la transacción por referencia (respaldo cuando el webhook no puede
+     * llegar, p.ej. desarrollo local sin túnel público). Devuelve el array
+     * crudo de la transacción de Wompi o null si el usuario aún no paga.
+     */
+    public function fetchTransactionByReference(string $reference): ?array
+    {
+        $response = $this->client()
+            ->withToken($this->config()['private_key'])
+            ->get($this->apiBase().'/transactions', ['reference' => $reference]);
+
+        return $response->json('data.0');
+    }
+
+    /** ¿URL de localhost / red privada? (rechazadas por el WAF de Wompi) */
+    public static function isPrivateUrl(string $url): bool
+    {
+        $host = parse_url($url, PHP_URL_HOST) ?: '';
+
+        return $host === 'localhost'
+            || str_ends_with($host, '.local')
+            || preg_match('/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/', $host) === 1;
     }
 
     // --- Recurrencia (fuentes de pago: tarjeta / Nequi) -------------------------
@@ -262,6 +292,21 @@ class WompiGateway implements PaymentGateway
 
     private function config(): array
     {
-        return config('services.wompi');
+        $config = config('services.wompi');
+
+        // Las llaves test/prod no se pueden mezclar: Wompi valida la firma con
+        // el secreto del MISMO ambiente de la llave pública (error real que ya
+        // pasó: prv_prod_ + pub_test_ → todo falla de forma confusa).
+        $expected = ($config['environment'] ?? 'sandbox') === 'production' ? 'prod' : 'test';
+        foreach (['public_key', 'private_key', 'events_secret', 'integrity_secret'] as $key) {
+            $value = (string) ($config[$key] ?? '');
+            if ($value !== '' && ! str_contains(substr($value, 0, 15), $expected)) {
+                throw new RuntimeException(
+                    "Llaves de Wompi mezcladas: WOMPI_ENV={$config['environment']} pero {$key} es del otro ambiente. Usa el juego completo del mismo ambiente."
+                );
+            }
+        }
+
+        return $config;
     }
 }

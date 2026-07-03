@@ -2,12 +2,16 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Domains\Billing\Infrastructure\Gateways\WompiGateway;
 use App\Http\Controllers\Controller;
+use App\Models\BillingPayment;
 use App\Models\PaymentMethod;
 use App\Models\Plan;
+use App\Models\User;
 use App\Services\Billing\SubscriptionManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Fuente de verdad del estado de suscripción para TODOS los clientes
@@ -17,9 +21,15 @@ use Illuminate\Http\Request;
 class SubscriptionController extends Controller
 {
     /** Estado de la suscripción del usuario autenticado. */
-    public function status(Request $request): JsonResponse
+    public function status(Request $request, SubscriptionManager $manager): JsonResponse
     {
         $user = $request->user();
+
+        // Respaldo del webhook: si hay un pago Wompi pendiente reciente,
+        // consulta su estado real por API. Cubre dev local (el webhook no
+        // puede llegar) y webhooks demorados mientras el front hace polling.
+        $this->reconcilePendingPayment($user, $manager);
+
         $sub = $user->activeSubscription;
 
         $daysUntilRenewal = $sub?->current_period_end
@@ -48,6 +58,35 @@ class SubscriptionController extends Controller
                 ] : null,
             ],
         ]);
+    }
+
+    /**
+     * Si el usuario tiene un pago Wompi 'pending' de la última hora sin
+     * resolver, consulta la transacción por referencia y la concilia con la
+     * misma lógica del webhook (idempotente). Nunca bloquea el status.
+     */
+    private function reconcilePendingPayment(User $user, SubscriptionManager $manager): void
+    {
+        $pending = BillingPayment::where('user_id', $user->id)
+            ->where('gateway', 'wompi')
+            ->where('status', 'pending')
+            ->where('created_at', '>', now()->subHour())
+            ->latest()
+            ->first();
+
+        if (! $pending || ! $pending->reference) {
+            return;
+        }
+
+        try {
+            $tx = app(WompiGateway::class)->fetchTransactionByReference($pending->reference);
+            if ($tx) {
+                $manager->handleWompiTransaction(['data' => ['transaction' => $tx]]);
+                $user->unsetRelation('activeSubscription');
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Wompi reconcile: '.$e->getMessage());
+        }
     }
 
     /**

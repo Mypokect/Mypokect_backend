@@ -51,6 +51,14 @@ class Subscription extends Model
         if (! in_array($this->status, self::ACTIVE_STATUSES, true)) {
             return false;
         }
+        // Una prueba SIEMPRE necesita fecha de fin vigente. Sin esto, el
+        // placeholder 'trialing' que crea el checkout antes de pagar (sin
+        // fechas) daba premium gratis con solo iniciar un checkout.
+        if ($this->status === 'trialing') {
+            $end = $this->trial_ends_at ?? $this->current_period_end;
+
+            return $end !== null && $end->isFuture();
+        }
         if ($this->current_period_end && $this->current_period_end->isPast()) {
             return false;
         }
