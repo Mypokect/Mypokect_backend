@@ -30,7 +30,13 @@ class PaymentController extends Controller
     /** Tokens de aceptación (T&C + autorización de datos) para el checkout. */
     public function acceptance(): JsonResponse
     {
-        return response()->json(['data' => $this->gateway->getAcceptance()]);
+        try {
+            return response()->json(['data' => $this->gateway->getAcceptance()]);
+        } catch (\Throwable $e) {
+            Log::warning('Wompi acceptance falló: '.$e->getMessage());
+
+            return response()->json(['error' => 'gateway_unavailable', 'message' => 'No se pudieron obtener los términos de Wompi.'], 502);
+        }
     }
 
     /** Cobra con una tarjeta tokenizada y activa/renueva la suscripción. */
@@ -77,6 +83,12 @@ class PaymentController extends Controller
 
         try {
             $result = $this->gateway->chargeWithToken($subscription, $plan, 'CARD', $data['card_token'], $data['email']);
+        } catch (\RuntimeException $e) {
+            // Mensaje propio del adapter (llaves mal configuradas, fuente de pago
+            // rechazada, etc.): es seguro y útil mostrarlo al usuario.
+            Log::error('Wompi pay-with-card falló', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+
+            return response()->json(['error' => 'payment_failed', 'message' => $e->getMessage()], 422);
         } catch (\Throwable $e) {
             Log::error('Wompi pay-with-card falló', ['user_id' => $user->id, 'error' => $e->getMessage()]);
 
@@ -85,6 +97,23 @@ class PaymentController extends Controller
 
         $tx = $result['transaction'];
         $wompiStatus = $tx['status'] ?? 'PENDING';
+
+        // Las transacciones con tarjeta se resuelven en segundos: polling corto
+        // para responder el estado FINAL y que el usuario vea "¡Bienvenido a
+        // Pro!" al instante en vez de "Pago en proceso". Si sigue PENDING lo
+        // cierra el webhook (o la reconciliación de /subscription/status).
+        for ($i = 0; $i < 4 && $wompiStatus === 'PENDING'; $i++) {
+            sleep(1);
+            try {
+                $fresh = $this->gateway->fetchTransactionByReference($result['reference']);
+                if ($fresh) {
+                    $tx = $fresh;
+                    $wompiStatus = $tx['status'] ?? 'PENDING';
+                }
+            } catch (\Throwable) {
+                break;
+            }
+        }
 
         // Concilia el resultado (activa la suscripción si quedó aprobado al instante).
         $this->manager->handleWompiTransaction([
@@ -121,6 +150,12 @@ class PaymentController extends Controller
         $subscription = $request->user()->activeSubscription;
         if (! $subscription) {
             return response()->json(['error' => 'no_subscription', 'message' => 'No hay una suscripción activa.'], 404);
+        }
+
+        // Sin fuente de pago guardada no hay nada que cobrar automáticamente.
+        if ($enabled && ! $subscription->gateway_subscription_id
+            && ! PaymentMethod::where('user_id', $request->user()->id)->where('is_default', true)->exists()) {
+            return response()->json(['error' => 'no_payment_method', 'message' => 'Guarda una tarjeta antes de activar el débito automático.'], 422);
         }
 
         $subscription->update(['auto_renew' => $enabled]);

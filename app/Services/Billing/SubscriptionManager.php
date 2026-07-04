@@ -42,7 +42,9 @@ class SubscriptionManager
      */
     public function startTrial(User $user, string $planCode = 'pro_monthly'): ?Subscription
     {
-        if ($user->subscriptions()->exists()) {
+        // Solo cuenta suscripciones REALES: un placeholder de checkout
+        // abandonado no debe quemar la prueba gratis del usuario.
+        if ($user->subscriptions()->real()->exists()) {
             return $user->activeSubscription;
         }
 
@@ -59,8 +61,7 @@ class SubscriptionManager
         $start = Carbon::now();
         $end = $start->copy()->addDays($days);
 
-        return Subscription::create([
-            'user_id' => $user->id,
+        $attributes = [
             'plan_id' => $plan->id,
             'status' => 'trialing',
             'gateway' => 'wompi',
@@ -68,7 +69,18 @@ class SubscriptionManager
             'current_period_start' => $start,
             'current_period_end' => $end,
             'trial_ends_at' => $end,
-        ]);
+        ];
+
+        // Reutiliza el placeholder si existe (checkout abandonado) en vez de
+        // acumular una segunda fila.
+        $placeholder = $user->subscriptions()->latest()->first();
+        if ($placeholder && $placeholder->isPlaceholder()) {
+            $placeholder->update($attributes);
+
+            return $placeholder;
+        }
+
+        return Subscription::create(['user_id' => $user->id] + $attributes);
     }
 
     /**
@@ -161,9 +173,17 @@ class SubscriptionManager
 
         $plan = $payment->plan ?? $subscription->plan;
         $start = Carbon::now();
+
+        // Renovación anticipada de un plan PAGO vigente: el nuevo período se
+        // encadena al fin del actual (pagar antes no regala días). Una prueba
+        // o suscripción vencida arranca desde ahora.
+        $base = ($subscription->status === 'active' && $subscription->current_period_end?->isFuture())
+            ? $subscription->current_period_end
+            : $start;
+
         $end = match ($plan?->interval) {
-            'month' => $start->copy()->addMonthNoOverflow(),
-            'year' => $start->copy()->addYear(),
+            'month' => $base->copy()->addMonthNoOverflow(),
+            'year' => $base->copy()->addYear(),
             default => null,
         };
 

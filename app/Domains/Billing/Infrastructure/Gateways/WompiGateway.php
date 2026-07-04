@@ -268,7 +268,13 @@ class WompiGateway implements PaymentGateway
 
     private function integritySignature(string $reference, int $amountInCents, string $currency): string
     {
-        $secret = $this->config()['integrity_secret'];
+        $secret = (string) $this->config()['integrity_secret'];
+
+        // Sin el secreto la firma sale inválida y el usuario solo descubre el
+        // error en la página de Wompi: mejor fallar aquí con mensaje claro.
+        if ($secret === '') {
+            throw new RuntimeException('Falta WOMPI_INTEGRITY_SECRET en el .env (cópialo del dashboard de Wompi).');
+        }
 
         return hash('sha256', $reference.$amountInCents.$currency.$secret);
     }

@@ -45,6 +45,28 @@ class Subscription extends Model
         return $this->hasMany(BillingPayment::class);
     }
 
+    /**
+     * Solo suscripciones "reales": excluye los placeholders 'trialing' sin
+     * fechas que crean CheckoutController/PaymentController antes de pagar.
+     * Un checkout abandonado NO debe contar como "ya tuvo suscripción".
+     */
+    public function scopeReal($query)
+    {
+        return $query->where(function ($q) {
+            $q->where('status', '!=', 'trialing')
+                ->orWhereNotNull('trial_ends_at')
+                ->orWhereNotNull('current_period_end');
+        });
+    }
+
+    /** ¿Es un placeholder de checkout (nunca activado ni con prueba)? */
+    public function isPlaceholder(): bool
+    {
+        return $this->status === 'trialing'
+            && $this->trial_ends_at === null
+            && $this->current_period_end === null;
+    }
+
     /** ¿Da acceso premium ahora mismo? (trialing o active, sin vencer) */
     public function isPremium(): bool
     {

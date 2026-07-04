@@ -41,8 +41,9 @@ class SubscriptionController extends Controller
         return response()->json([
             'data' => [
                 'status'     => $sub?->status ?? 'none',
-                // ¿Puede activar la prueba gratis? (nunca ha tenido suscripción)
-                'trial_available' => ! $sub && $user->subscriptions()->doesntExist(),
+                // ¿Puede activar la prueba gratis? (nunca ha tenido una
+                // suscripción REAL — un checkout abandonado no la quema)
+                'trial_available' => $user->subscriptions()->real()->doesntExist(),
                 'plan'       => $sub?->plan?->code,
                 'plan_name'  => $sub?->plan?->name,
                 'gateway'    => $sub?->gateway,
@@ -98,7 +99,7 @@ class SubscriptionController extends Controller
     {
         $user = $request->user();
 
-        if ($user->subscriptions()->exists()) {
+        if ($user->subscriptions()->real()->exists()) {
             return response()->json(['message' => 'Ya usaste tu prueba gratis. Elige un plan para continuar.'], 422);
         }
 

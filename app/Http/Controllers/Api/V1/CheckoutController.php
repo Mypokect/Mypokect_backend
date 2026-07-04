@@ -8,6 +8,7 @@ use App\Models\Plan;
 use App\Models\Subscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Inicia el checkout de suscripción con la pasarela (Wompi).
@@ -58,7 +59,13 @@ class CheckoutController extends Controller
 
         $subscription->setRelation('user', $user);
 
-        $checkout = $this->gateway->createCheckout($subscription, $plan);
+        try {
+            $checkout = $this->gateway->createCheckout($subscription, $plan);
+        } catch (\RuntimeException $e) {
+            Log::error('Wompi checkout falló: '.$e->getMessage());
+
+            return response()->json(['error' => 'gateway_unavailable', 'message' => 'La pasarela de pagos no está disponible: '.$e->getMessage()], 503);
+        }
 
         return response()->json([
             'data' => [
