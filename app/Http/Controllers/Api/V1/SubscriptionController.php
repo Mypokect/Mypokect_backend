@@ -32,8 +32,12 @@ class SubscriptionController extends Controller
 
         $sub = $user->activeSubscription;
 
-        $daysUntilRenewal = $sub?->current_period_end
-            ? max(0, (int) ceil(now()->floatDiffInDays($sub->current_period_end, false)))
+        // Fin del período: para pruebas creadas sin current_period_end (datos
+        // antiguos) se usa trial_ends_at — sin esto days_until_renewal salía
+        // null y el front mostraba "Pro Mensual" en vez del contador de prueba.
+        $periodEnd = $sub?->current_period_end ?? $sub?->trial_ends_at;
+        $daysUntilRenewal = $periodEnd
+            ? max(0, (int) ceil(now()->floatDiffInDays($periodEnd, false)))
             : null;
 
         $pm = PaymentMethod::where('user_id', $user->id)->where('is_default', true)->first();
