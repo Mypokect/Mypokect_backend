@@ -114,12 +114,39 @@ class SubscriptionManager
             return true;
         }
 
+        // Defensa en profundidad: nunca aprobar si el monto o la moneda del
+        // evento no coinciden con lo que se cobró. La firma de integridad del
+        // checkout ya fija el monto en Wompi, pero si ese secreto faltara o
+        // estuviera mal configurado, esto impide activar Pro pagando menos.
+        if ($wompiStatus === 'APPROVED' && ! $this->amountMatches($payment, $tx)) {
+            Log::error('Wompi webhook APPROVED con monto/moneda distintos al esperado — NO se aprueba', [
+                'payment_id' => $payment->id,
+                'expected_cents' => $payment->amount_cents,
+                'received_cents' => $tx['amount_in_cents'] ?? null,
+                'expected_currency' => $payment->currency,
+                'received_currency' => $tx['currency'] ?? null,
+            ]);
+
+            return $this->markFailed($payment, $tx, 'rejected');
+        }
+
         return match ($wompiStatus) {
             'APPROVED' => $this->approve($payment, $tx),
             'DECLINED', 'ERROR' => $this->markFailed($payment, $tx, 'rejected'),
             'VOIDED' => $this->markFailed($payment, $tx, 'refunded'),
             default => true, // PENDING u otros: nada que hacer aún
         };
+    }
+
+    /** El evento debe traer exactamente el monto y la moneda del cobro registrado. */
+    private function amountMatches(BillingPayment $payment, array $tx): bool
+    {
+        $receivedCents = $tx['amount_in_cents'] ?? null;
+        $receivedCurrency = $tx['currency'] ?? null;
+
+        return $receivedCents !== null
+            && (int) $receivedCents === (int) $payment->amount_cents
+            && strtoupper((string) $receivedCurrency) === strtoupper((string) $payment->currency);
     }
 
     private function approve(BillingPayment $payment, array $tx): bool

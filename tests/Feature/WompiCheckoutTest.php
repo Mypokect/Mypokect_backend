@@ -17,11 +17,13 @@ class WompiCheckoutTest extends TestCase
     {
         parent::setUp();
 
+        // Los secretos llevan el marcador de ambiente ("test") como las llaves
+        // reales de Wompi: el gateway rechaza juegos de llaves mezclados.
         config()->set('services.wompi', [
             'public_key'       => 'pub_test_abc',
             'private_key'      => 'prv_test_abc',
-            'integrity_secret' => 'integ_secret',
-            'events_secret'    => 'events_secret',
+            'integrity_secret' => 'test_integrity_abc',
+            'events_secret'    => 'test_events_abc',
             'environment'      => 'sandbox',
             'redirect_url'     => 'http://localhost:5173/suscripcion/gracias',
         ]);
@@ -151,14 +153,14 @@ class WompiCheckoutTest extends TestCase
     {
         $timestamp = 1700000000;
         $properties = ['transaction.id', 'transaction.status', 'transaction.amount_in_cents'];
-        $concat = $txId.$status.$amount.$timestamp.'events_secret';
+        $concat = $txId.$status.$amount.$timestamp.config('services.wompi.events_secret');
         $checksum = hash('sha256', $concat);
 
         return [
             'event' => 'transaction.updated',
             'data'  => ['transaction' => [
                 'id' => $txId, 'status' => $status, 'reference' => $reference,
-                'amount_in_cents' => $amount, 'payment_method_type' => 'CARD',
+                'amount_in_cents' => $amount, 'currency' => 'COP', 'payment_method_type' => 'CARD',
             ]],
             'timestamp' => $timestamp,
             'signature' => ['properties' => $properties, 'checksum' => $checksum],

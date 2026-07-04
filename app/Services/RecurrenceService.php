@@ -29,8 +29,10 @@ class RecurrenceService
         // Convert to user's timezone for calculation
         $localDate = $currentDate->copy()->setTimezone($tz);
         
-        // Move to next month
-        $nextMonth = $localDate->copy()->addMonth();
+        // Move to next month. addMonth() a secas DESBORDA en fin de mes
+        // (31 ene + 1 mes = 3 mar), lo que saltaba febrero/abril/junio/...
+        // para recordatorios anclados a los días 29-31.
+        $nextMonth = $localDate->copy()->addMonthNoOverflow();
         
         // Get the last day of that month
         $lastDayOfMonth = $nextMonth->daysInMonth;

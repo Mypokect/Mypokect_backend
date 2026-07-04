@@ -301,17 +301,19 @@ class HybridTransactionParser
     private function extractWordAmount(string $input): ?float
     {
         $wordKeys = implode('|', array_map(fn ($w) => preg_quote($w, '/'), array_keys(self::WORD_NUMS)));
+        $word = '(?:'.$wordKeys.')';
 
-        // Pattern: WORD [y WORD] mil  →  e.g. "veinte mil", "treinta y cinco mil"
-        $pattern = '/\b((?:'.$wordKeys.')(?:\s+y\s+(?:'.$wordKeys.'))?)\s+mil\b/iu';
+        // Secuencia de palabras-número antes de "mil" (con "y" opcional entre
+        // ellas) y residuo opcional después: "veinte mil", "treinta y cinco mil",
+        // "trescientos cuarenta y dos mil", "veinte mil quinientos".
+        // El patrón anterior solo aceptaba WORD [y WORD], así que perdía las
+        // centenas: "trescientos cuarenta y dos mil" se leía como 42.000.
+        $pattern = '/\b('.$word.'(?:\s+(?:y\s+)?'.$word.'){0,3})\s+mil\b(?:\s+('.$word.'(?:\s+(?:y\s+)?'.$word.'){0,2})\b)?/iu';
         if (preg_match($pattern, $input, $m)) {
-            $parts = preg_split('/\s+y\s+/iu', mb_strtolower(trim($m[1])));
-            $total = 0;
-            foreach ($parts as $part) {
-                $total += self::WORD_NUMS[trim($part)] ?? 0;
-            }
-            if ($total > 0) {
-                return (float) ($total * 1000);
+            $thousands = $this->sumWordParts($m[1]);
+            $remainder = isset($m[2]) && $m[2] !== '' ? $this->sumWordParts($m[2]) : 0;
+            if ($thousands > 0 && $remainder < 1000) {
+                return (float) ($thousands * 1000 + $remainder);
             }
         }
 
@@ -321,6 +323,18 @@ class HybridTransactionParser
         }
 
         return null;
+    }
+
+    /** Suma una frase de palabras-número ("trescientos cuarenta y dos" → 342). */
+    private function sumWordParts(string $phrase): int
+    {
+        $parts = preg_split('/\s+(?:y\s+)?/iu', mb_strtolower(trim($phrase)));
+        $total = 0;
+        foreach ($parts as $part) {
+            $total += self::WORD_NUMS[trim($part)] ?? 0;
+        }
+
+        return $total;
     }
 
     // ── Intent ────────────────────────────────────────────────────────────────

@@ -24,6 +24,8 @@ class AuthController extends Controller
 
     private const PASSWORD_RESET_CODE_TTL_SECONDS = 30;
 
+    private const PASSWORD_RESET_MAX_ATTEMPTS = 5;
+
     private const PASSWORD_RESET_TOKEN_TTL_MINUTES = 10;
 
     /**
@@ -139,10 +141,11 @@ class AuthController extends Controller
         ], now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS));
 
         // TODO: Reemplazar este log por el envío real mediante un proveedor SMS.
+        // El código NUNCA se escribe en el log: los logs suelen terminar en
+        // agregadores externos y un código de recuperación es una credencial.
         Log::info('Password recovery code generated', [
             'user_id' => $user->id,
             'phone' => $phone,
-            'code' => $code,
             'expires_in' => self::PASSWORD_RESET_CODE_TTL_SECONDS,
         ]);
 
@@ -179,7 +182,23 @@ class AuthController extends Controller
             return $this->errorResponse('El código expiró. Solicita uno nuevo.', 422);
         }
 
-        if ((string) $payload['code'] !== (string) $request->input('code')) {
+        // hash_equals evita fugas por tiempo de comparación; el contador de
+        // intentos invalida el código ante fuerza bruta (el throttle por IP
+        // no protege contra ataques distribuidos).
+        if (! hash_equals((string) $payload['code'], (string) $request->input('code'))) {
+            $payload['attempts'] = (int) ($payload['attempts'] ?? 0) + 1;
+            $expiresAt = isset($payload['expires_at'])
+                ? Carbon::parse($payload['expires_at'])
+                : now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS);
+
+            if ($payload['attempts'] >= self::PASSWORD_RESET_MAX_ATTEMPTS || $expiresAt->isPast()) {
+                Cache::forget($this->passwordResetCodeCacheKey($phone));
+
+                return $this->errorResponse('Demasiados intentos fallidos. Solicita un código nuevo.', 429);
+            }
+
+            Cache::put($this->passwordResetCodeCacheKey($phone), $payload, $expiresAt);
+
             return $this->errorResponse('El código ingresado no es válido.', 422);
         }
 
