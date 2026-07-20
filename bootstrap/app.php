@@ -26,9 +26,10 @@ return Application::configure(basePath: dirname(__DIR__))
         },
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        // Gating de features premium
+        // Gating de features premium + roles del panel de administración
         $middleware->alias([
             'subscription.active' => EnsureSubscriptionActive::class,
+            'role' => \Spatie\Permission\Middleware\RoleMiddleware::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

@@ -23,3 +23,23 @@ Schedule::command('subscriptions:renew')
 Schedule::command('subscriptions:remind')
     ->dailyAt('09:00')
     ->withoutOverlapping();
+
+// Otorga (o quita) el rol de administrador del panel web por teléfono.
+// Uso: php artisan admin:grant 3001234567  |  php artisan admin:grant 3001234567 --revoke
+Artisan::command('admin:grant {phone} {--revoke}', function (string $phone) {
+    $user = \App\Models\User::where('phone', $phone)->first();
+    if (! $user) {
+        $this->error("No existe un usuario con teléfono {$phone}.");
+
+        return 1;
+    }
+    if ($this->option('revoke')) {
+        $user->removeRole('super-admin');
+        $this->info("Rol super-admin retirado a {$user->name}.");
+    } else {
+        $user->assignRole('super-admin');
+        $this->info("{$user->name} ahora es super-admin del panel.");
+    }
+
+    return 0;
+})->purpose('Gestiona el rol de administrador del panel web');

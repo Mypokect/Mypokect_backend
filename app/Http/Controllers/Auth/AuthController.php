@@ -583,6 +583,9 @@ class AuthController extends Controller
             'name' => $user->name ?? '',
             'phone' => $user->phone ?? '',
             'country_code' => $user->country_code ?? '',
+            'email' => $user->email,
+            // El panel /admin de la web se muestra solo con rol admin/super-admin
+            'roles' => $user->getRoleNames(),
             'has_active_challenge' => $hasSavingsCol ? (bool) $user->has_active_challenge : false,
             'savings_mode_pct' => $savingsPctCol ? (float) ($user->savings_mode_pct ?? 0.0) : 0.0,
         ], 'Perfil del usuario');

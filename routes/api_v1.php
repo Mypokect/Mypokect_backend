@@ -1,8 +1,10 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Admin\AdminController;
 use App\Http\Controllers\Api\V1\CheckoutController;
 use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Controllers\Api\V1\SubscriptionController;
+use App\Models\Announcement;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -43,4 +45,25 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Método de pago guardado (para "Visa ****1234" y su eliminación)
     Route::get('/payment-method', [PaymentController::class, 'paymentMethod']);
     Route::delete('/payment-method', [PaymentController::class, 'destroyPaymentMethod']);
+
+    // Novedades publicadas (visibles para todos los usuarios de la app)
+    Route::get('/announcements', fn () => response()->json([
+        'data' => Announcement::where('is_published', true)
+            ->latest('published_at')->limit(20)
+            ->get(['id', 'title', 'body', 'type', 'published_at']),
+    ]));
+
+    // ── Panel de administración (solo admin / super-admin) ────────────
+    Route::prefix('admin')->middleware('role:admin|super-admin')->group(function () {
+        Route::get('/overview', [AdminController::class, 'overview']);
+        Route::get('/users', [AdminController::class, 'users']);
+        Route::post('/users/{user}/premium', [AdminController::class, 'setPremium']);
+        Route::get('/payments', [AdminController::class, 'payments']);
+        Route::get('/plans', [AdminController::class, 'plans']);
+        Route::put('/plans/{plan}', [AdminController::class, 'updatePlan']);
+        Route::get('/announcements', [AdminController::class, 'announcements']);
+        Route::post('/announcements', [AdminController::class, 'storeAnnouncement']);
+        Route::put('/announcements/{announcement}', [AdminController::class, 'updateAnnouncement']);
+        Route::delete('/announcements/{announcement}', [AdminController::class, 'destroyAnnouncement']);
+    });
 });
