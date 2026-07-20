@@ -15,9 +15,10 @@ use Illuminate\Support\Str;
 /**
  * Login EXCLUSIVO del panel de administración, en dos pasos:
  *
- *  1. POST /v1/admin/auth/login   (teléfono + clave, y el usuario debe tener
- *     rol admin/super-admin) → genera un código de 6 dígitos y lo envía por
- *     SMS al teléfono registrado.
+ *  1. POST /v1/admin/auth/login   (nombre de usuario admin + clave, y el
+ *     usuario debe tener rol admin/super-admin) → genera un código de 6
+ *     dígitos y lo envía por SMS al teléfono registrado, avisando además
+ *     que ese usuario está siendo usado.
  *  2. POST /v1/admin/auth/verify  (teléfono + código) → emite el token
  *     Sanctum `admin_web`, el ÚNICO que las rutas /admin aceptan.
  *
@@ -33,21 +34,21 @@ class AdminAuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'phone'    => ['required', 'string', 'max:20'],
+            'username' => ['required', 'string', 'max:40'],
             'password' => ['required', 'string'],
         ]);
 
-        $throttleKey = 'admin_login:'.Str::lower($validated['phone']);
+        $throttleKey = 'admin_login:'.Str::lower($validated['username']);
         if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
             $seconds = RateLimiter::availableIn($throttleKey);
 
             return response()->json(['message' => "Demasiados intentos. Espera {$seconds} segundos."], 429);
         }
 
-        $user = User::where('phone', $validated['phone'])->first();
+        $user = User::where('admin_username', $validated['username'])->first();
 
         // Respuesta idéntica para clave mala, usuario inexistente o sin rol:
-        // no filtrar cuáles teléfonos son de administradores.
+        // no filtrar cuáles nombres de usuario administran el panel.
         if (! $user
             || ! Hash::check($validated['password'], $user->password)
             || ! $user->hasAnyRole(['admin', 'super-admin'])) {
@@ -59,14 +60,18 @@ class AdminAuthController extends Controller
         RateLimiter::clear($throttleKey);
 
         $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        Cache::put($this->cacheKey($user->phone), [
+        Cache::put($this->cacheKey($validated['username']), [
             'user_id'  => $user->id,
             'code'     => $code,
             'attempts' => 0,
         ], now()->addSeconds(self::CODE_TTL_SECONDS));
 
-        // TODO producción: enviar por el proveedor de SMS real.
-        Log::info('Admin 2FA code generated', ['user_id' => $user->id, 'code' => $code]);
+        // Notificación al teléfono registrado: avisa que el usuario admin está
+        // siendo usado Y entrega el código. Si no fue el dueño, se entera al
+        // instante. TODO producción: enviar por el proveedor de SMS real.
+        $sms = "My Pokect: tu usuario administrador \"{$validated['username']}\" está siendo usado para entrar al panel. "
+            ."Código: {$code} (vence en 5 min). Si no eres tú, cambia tu clave ya.";
+        Log::info('Admin 2FA SMS', ['user_id' => $user->id, 'to' => $user->phone, 'message' => $sms]);
 
         $data = [
             'phone_mask' => substr($user->phone, 0, 3).'•••'.substr($user->phone, -2),
@@ -82,11 +87,11 @@ class AdminAuthController extends Controller
     public function verify(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'phone' => ['required', 'string', 'max:20'],
-            'code'  => ['required', 'digits:6'],
+            'username' => ['required', 'string', 'max:40'],
+            'code'     => ['required', 'digits:6'],
         ]);
 
-        $key = $this->cacheKey($validated['phone']);
+        $key = $this->cacheKey($validated['username']);
         $payload = Cache::get($key);
 
         if (! is_array($payload)) {
@@ -114,6 +119,13 @@ class AdminAuthController extends Controller
         $user->tokens()->where('name', 'admin_web')->delete();
         $token = $user->createToken('admin_web')->plainTextToken;
 
+        // Aviso de acceso confirmado al teléfono registrado (auditoría).
+        Log::info('Admin panel access granted', [
+            'user_id' => $user->id,
+            'to'      => $user->phone,
+            'message' => 'My Pokect: nuevo ingreso al panel de administración con tu usuario. Si no fuiste tú, avísanos de inmediato.',
+        ]);
+
         return response()->json(['data' => [
             'token' => $token,
             'user'  => [
@@ -124,8 +136,8 @@ class AdminAuthController extends Controller
         ]]);
     }
 
-    private function cacheKey(string $phone): string
+    private function cacheKey(string $username): string
     {
-        return 'admin_2fa:'.Str::lower(trim($phone));
+        return 'admin_2fa:'.Str::lower(trim($username));
     }
 }
