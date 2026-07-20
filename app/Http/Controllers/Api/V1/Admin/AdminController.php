@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\AnalyticsEvent;
 use App\Models\Announcement;
 use App\Models\BillingPayment;
 use App\Models\Plan;
@@ -11,6 +12,7 @@ use App\Models\User;
 use App\Models\WebhookLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Panel de administración de la plataforma (solo roles admin / super-admin).
@@ -195,6 +197,57 @@ class AdminController extends Controller
         $plan->update($validated);
 
         return response()->json(['data' => ['ok' => true]]);
+    }
+
+    /**
+     * Analítica de uso: tráfico por sección (page_views de la web), visitas
+     * por día y actividad real por función (filas creadas en cada dominio).
+     * Con esto se ve qué partes usa la gente y cuáles no.
+     */
+    public function analytics(): JsonResponse
+    {
+        $since30 = now()->subDays(30);
+        $since14 = now()->subDays(14);
+
+        $sections = AnalyticsEvent::where('event', 'page_view')
+            ->where('occurred_at', '>', $since30)
+            ->select(
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(properties, '$.section')) as section"),
+                DB::raw('COUNT(*) as visits'),
+                DB::raw('COUNT(DISTINCT user_id) as unique_users'),
+            )
+            ->groupBy('section')
+            ->orderByDesc('visits')
+            ->get();
+
+        $daily = AnalyticsEvent::where('event', 'page_view')
+            ->where('occurred_at', '>', $since14)
+            ->select(
+                DB::raw('DATE(occurred_at) as day'),
+                DB::raw('COUNT(*) as visits'),
+                DB::raw('COUNT(DISTINCT user_id) as unique_users'),
+            )
+            ->groupBy('day')
+            ->orderBy('day')
+            ->get();
+
+        // Actividad real por función: cuántas filas creó la gente en 30 días.
+        $activity = collect([
+            'movements'   => 'movements',
+            'budgets'     => 'budgets',
+            'goals'       => 'saving_goals',
+            'goal_contributions' => 'goal_contributions',
+            'reminders'   => 'reminders',
+            'scheduled'   => 'scheduled_transactions',
+        ])->map(fn (string $table) => DB::table($table)->where('created_at', '>', $since30)->count());
+
+        return response()->json(['data' => [
+            'active_users_7d'  => AnalyticsEvent::where('occurred_at', '>', now()->subDays(7))->distinct()->count('user_id'),
+            'active_users_30d' => AnalyticsEvent::where('occurred_at', '>', $since30)->distinct()->count('user_id'),
+            'sections_30d'     => $sections,
+            'daily_14d'        => $daily,
+            'feature_activity_30d' => $activity,
+        ]]);
     }
 
     // ── Novedades / actualizaciones ─────────────────────────────────────

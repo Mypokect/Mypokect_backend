@@ -54,6 +54,20 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::get('/payment-method', [PaymentController::class, 'paymentMethod']);
     Route::delete('/payment-method', [PaymentController::class, 'destroyPaymentMethod']);
 
+    // Analítica de producto: la web reporta cada visita de sección
+    // (page_view). El panel admin agrega estos eventos para ver el tráfico.
+    Route::post('/analytics/track', function (\Illuminate\Http\Request $request) {
+        $validated = $request->validate(['section' => ['required', 'string', 'max:40']]);
+        \App\Models\AnalyticsEvent::create([
+            'user_id'     => $request->user()->id,
+            'event'       => 'page_view',
+            'properties'  => ['section' => $validated['section']],
+            'occurred_at' => now(),
+        ]);
+
+        return response()->json(['ok' => true]);
+    })->middleware('throttle:240,1');
+
     // Novedades publicadas (visibles para todos los usuarios de la app)
     Route::get('/announcements', fn () => response()->json([
         'data' => Announcement::where('is_published', true)
@@ -66,6 +80,7 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // el token `admin_web` emitido solo tras verificar el código SMS.
     Route::prefix('admin')->middleware(['admin.gate', 'role:admin|super-admin', 'admin.session'])->group(function () {
         Route::get('/overview', [AdminController::class, 'overview']);
+        Route::get('/analytics', [AdminController::class, 'analytics']);
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{user}/premium', [AdminController::class, 'setPremium']);
         Route::get('/payments', [AdminController::class, 'payments']);
