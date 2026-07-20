@@ -586,6 +586,8 @@ class AuthController extends Controller
             'email' => $user->email,
             // El panel /admin de la web se muestra solo con rol admin/super-admin
             'roles' => $user->getRoleNames(),
+            // true solo si esta sesión pasó el login admin con código SMS
+            'admin_session' => $user->currentAccessToken()?->name === 'admin_web',
             'has_active_challenge' => $hasSavingsCol ? (bool) $user->has_active_challenge : false,
             'savings_mode_pct' => $savingsPctCol ? (float) ($user->savings_mode_pct ?? 0.0) : 0.0,
         ], 'Perfil del usuario');

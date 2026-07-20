@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Admin\AdminAuthController;
 use App\Http\Controllers\Api\V1\Admin\AdminController;
 use App\Http\Controllers\Api\V1\CheckoutController;
 use App\Http\Controllers\Api\V1\PaymentController;
@@ -27,6 +28,10 @@ Route::get('/', fn () => response()->json(['message' => 'Finance API v1']));
 // Catálogo público de planes (para landing / pricing)
 Route::get('/plans', [SubscriptionController::class, 'plans']);
 
+// Login del panel de administración (2 pasos: clave + código SMS)
+Route::post('/admin/auth/login', [AdminAuthController::class, 'login'])->middleware('throttle:10,1');
+Route::post('/admin/auth/verify', [AdminAuthController::class, 'verify'])->middleware('throttle:10,1');
+
 Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Estado de suscripción — fuente de verdad para gating en todos los clientes
     Route::get('/subscription/status', [SubscriptionController::class, 'status']);
@@ -53,8 +58,10 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
             ->get(['id', 'title', 'body', 'type', 'published_at']),
     ]));
 
-    // ── Panel de administración (solo admin / super-admin) ────────────
-    Route::prefix('admin')->middleware('role:admin|super-admin')->group(function () {
+    // ── Panel de administración ───────────────────────────────────────
+    // Exige rol admin Y el token `admin_web` (emitido solo tras verificar
+    // el código SMS en /admin/auth/verify).
+    Route::prefix('admin')->middleware(['role:admin|super-admin', 'admin.session'])->group(function () {
         Route::get('/overview', [AdminController::class, 'overview']);
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{user}/premium', [AdminController::class, 'setPremium']);
