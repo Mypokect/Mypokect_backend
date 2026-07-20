@@ -1,7 +1,8 @@
 <?php
 
-use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Api\PhoneVerificationController;
 use App\Http\Controllers\Api\ReminderController;
+use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\Budget\BudgetController;
 use App\Http\Controllers\Finance\GoalContributionController;
 use App\Http\Controllers\Finance\MovementController;
@@ -43,6 +44,18 @@ Route::post('/register', [AuthController::class, 'register'])
 Route::post('/register/verify-code', [AuthController::class, 'verifyRegistrationCode'])
     ->middleware('throttle:12,1');
 
+// --- VERIFICACIÓN DE TELÉFONO (OTP por SMS/WhatsApp) ---
+// El cooldown fino (1 envío por minuto por teléfono) lo aplica el servicio;
+// el throttle por IP de aquí frena el abuso distribuido.
+Route::prefix('phone')->group(function () {
+    Route::post('/send-code', [PhoneVerificationController::class, 'sendCode'])
+        ->middleware('throttle:6,1');
+    Route::post('/verify', [PhoneVerificationController::class, 'verify'])
+        ->middleware('throttle:12,1');
+    Route::post('/resend', [PhoneVerificationController::class, 'resend'])
+        ->middleware('throttle:6,1');
+});
+
 Route::post('/password-recovery/request-code', [AuthController::class, 'requestPasswordResetCode'])
     ->middleware('throttle:6,1');
 
@@ -56,9 +69,9 @@ Route::post('/password-recovery/reset-password', [AuthController::class, 'resetP
 Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
 
     // 1. HOME & USUARIO
-    Route::get('/home-data',          [AuthController::class, 'homeData']);
-    Route::get('/financial-summary',  [AuthController::class, 'financialSummary']);
-    Route::get('/user/profile',       [AuthController::class, 'getUserProfile']);
+    Route::get('/home-data', [AuthController::class, 'homeData']);
+    Route::get('/financial-summary', [AuthController::class, 'financialSummary']);
+    Route::get('/user/profile', [AuthController::class, 'getUserProfile']);
 
     // 2. MOVIMIENTOS
     Route::get('/movements', [MovementController::class, 'index']);
@@ -104,18 +117,18 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Análisis de ahorro mensual (50/30/20)
     Route::get('/savings/analyze', [SavingsController::class, 'analyze']);
     // Guardar modo de ahorro elegido por el usuario
-    Route::post('/savings/save-plan',    [SavingsController::class, 'savePlan']);
+    Route::post('/savings/save-plan', [SavingsController::class, 'savePlan']);
     // Cancelar el reto de ahorro activo
-    Route::post('/savings/cancel-plan',  [SavingsController::class, 'cancelPlan']);
+    Route::post('/savings/cancel-plan', [SavingsController::class, 'cancelPlan']);
 
     // 6. IMPUESTOS (RADAR Y DECLARACIÓN)
-    Route::get('/taxes/data',               [TaxController::class, 'getData']);              // Datos pre-llenados + cálculo por defecto
-    Route::get('/taxes/alerts',             [TaxController::class, 'checkLimits']);         // Semáforo Fiscal (año ?year=)
-    Route::get('/taxes/profile',            [TaxController::class, 'getProfile']);          // Perfil fiscal del usuario
-    Route::post('/taxes/profile',           [TaxController::class, 'saveProfile']);         // Guardar / actualizar perfil
-    Route::post('/taxes/recalculate',       [TaxController::class, 'recalculate'])->middleware('throttle:10,1');  // Simulador interactivo
-    Route::get('/taxes/cedular-movements',  [TaxController::class, 'getCedularMovements']); // Movimientos agrupados por cédula
-    Route::post('/taxes/move-cedular',       [TaxController::class, 'moveCedularMovement'])->middleware('throttle:30,1'); // Reclasificar ingreso
+    Route::get('/taxes/data', [TaxController::class, 'getData']);              // Datos pre-llenados + cálculo por defecto
+    Route::get('/taxes/alerts', [TaxController::class, 'checkLimits']);         // Semáforo Fiscal (año ?year=)
+    Route::get('/taxes/profile', [TaxController::class, 'getProfile']);          // Perfil fiscal del usuario
+    Route::post('/taxes/profile', [TaxController::class, 'saveProfile']);         // Guardar / actualizar perfil
+    Route::post('/taxes/recalculate', [TaxController::class, 'recalculate'])->middleware('throttle:10,1');  // Simulador interactivo
+    Route::get('/taxes/cedular-movements', [TaxController::class, 'getCedularMovements']); // Movimientos agrupados por cédula
+    Route::post('/taxes/move-cedular', [TaxController::class, 'moveCedularMovement'])->middleware('throttle:30,1'); // Reclasificar ingreso
     Route::post('/taxes/move-gasto-cedular', [TaxController::class, 'moveCedularExpense'])->middleware('throttle:30,1');  // Reclasificar gasto
 
     // 7. PRESUPUESTOS INTELIGENTES (Smart Budget)
