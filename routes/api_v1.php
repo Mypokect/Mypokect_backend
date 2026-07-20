@@ -28,9 +28,12 @@ Route::get('/', fn () => response()->json(['message' => 'Finance API v1']));
 // Catálogo público de planes (para landing / pricing)
 Route::get('/plans', [SubscriptionController::class, 'plans']);
 
-// Login del panel de administración (2 pasos: clave + código SMS)
-Route::post('/admin/auth/login', [AdminAuthController::class, 'login'])->middleware('throttle:10,1');
-Route::post('/admin/auth/verify', [AdminAuthController::class, 'verify'])->middleware('throttle:10,1');
+// Login del panel de administración (2 pasos: clave + código SMS).
+// admin.gate: sin la llave secreta X-Admin-Gate, estas rutas devuelven 404.
+Route::middleware('admin.gate')->group(function () {
+    Route::post('/admin/auth/login', [AdminAuthController::class, 'login'])->middleware('throttle:10,1');
+    Route::post('/admin/auth/verify', [AdminAuthController::class, 'verify'])->middleware('throttle:10,1');
+});
 
 Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     // Estado de suscripción — fuente de verdad para gating en todos los clientes
@@ -59,9 +62,9 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     ]));
 
     // ── Panel de administración ───────────────────────────────────────
-    // Exige rol admin Y el token `admin_web` (emitido solo tras verificar
-    // el código SMS en /admin/auth/verify).
-    Route::prefix('admin')->middleware(['role:admin|super-admin', 'admin.session'])->group(function () {
+    // Tres candados: llave secreta (admin.gate, si no → 404), rol admin y
+    // el token `admin_web` emitido solo tras verificar el código SMS.
+    Route::prefix('admin')->middleware(['admin.gate', 'role:admin|super-admin', 'admin.session'])->group(function () {
         Route::get('/overview', [AdminController::class, 'overview']);
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{user}/premium', [AdminController::class, 'setPremium']);

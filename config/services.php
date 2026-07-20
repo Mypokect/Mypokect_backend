@@ -43,6 +43,11 @@ return [
         'server_key' => env('FCM_SERVER_KEY'),
     ],
 
+    // Compuerta secreta del panel admin: sin esta llave, /admin/* responde 404.
+    'admin' => [
+        'gate_key' => env('ADMIN_GATE_KEY'),
+    ],
+
     /*
     | Wompi (Bancolombia) — pasarela de pago única del SaaS.
     | Llaves del panel de comercio: https://comercios.wompi.co
