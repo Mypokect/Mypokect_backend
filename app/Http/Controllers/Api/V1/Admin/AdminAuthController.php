@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\Sms\SmsSender;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -68,10 +69,20 @@ class AdminAuthController extends Controller
 
         // Notificación al teléfono registrado: avisa que el usuario admin está
         // siendo usado Y entrega el código. Si no fue el dueño, se entera al
-        // instante. TODO producción: enviar por el proveedor de SMS real.
+        // instante. Envío real vía SmsSender (driver log en local, twilio en
+        // producción). El mensaje contiene el código: nunca va al log.
         $sms = "My Pokect: tu usuario administrador \"{$validated['username']}\" está siendo usado para entrar al panel. "
             ."Código: {$code} (vence en 5 min). Si no eres tú, cambia tu clave ya.";
-        Log::info('Admin 2FA SMS', ['user_id' => $user->id, 'to' => $user->phone, 'message' => $sms]);
+
+        try {
+            app(SmsSender::class)->sendTo($user->phone, $user->country_code, $sms);
+        } catch (\Throwable $e) {
+            Log::error('No se pudo enviar el SMS del login admin', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+
+            return response()->json(['message' => 'No pudimos enviar el código por SMS. Intenta de nuevo en unos minutos.'], 500);
+        }
+
+        Log::info('Admin 2FA SMS sent', ['user_id' => $user->id]);
 
         $data = [
             'phone_mask' => substr($user->phone, 0, 3).'•••'.substr($user->phone, -2),
@@ -120,11 +131,18 @@ class AdminAuthController extends Controller
         $token = $user->createToken('admin_web')->plainTextToken;
 
         // Aviso de acceso confirmado al teléfono registrado (auditoría).
-        Log::info('Admin panel access granted', [
-            'user_id' => $user->id,
-            'to'      => $user->phone,
-            'message' => 'My Pokect: nuevo ingreso al panel de administración con tu usuario. Si no fuiste tú, avísanos de inmediato.',
-        ]);
+        // Si el envío falla no bloquea el ingreso: el código ya fue verificado.
+        try {
+            app(SmsSender::class)->sendTo(
+                $user->phone,
+                $user->country_code,
+                'My Pokect: nuevo ingreso al panel de administración con tu usuario. Si no fuiste tú, avísanos de inmediato.'
+            );
+        } catch (\Throwable $e) {
+            Log::warning('No se pudo enviar el aviso de ingreso admin', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+        }
+
+        Log::info('Admin panel access granted', ['user_id' => $user->id]);
 
         return response()->json(['data' => [
             'token' => $token,

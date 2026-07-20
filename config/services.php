@@ -49,6 +49,21 @@ return [
     ],
 
     /*
+    | SMS transaccional — códigos de verificación de login, registro,
+    | recuperación de clave y login admin (App\Services\Sms\SmsSender).
+    | SMS_DRIVER=log no envía nada (local/staging); SMS_DRIVER=twilio envía real.
+    */
+    'sms' => [
+        'driver' => env('SMS_DRIVER', 'log'),
+        'twilio' => [
+            'sid' => env('TWILIO_ACCOUNT_SID'),
+            'token' => env('TWILIO_AUTH_TOKEN'),
+            // Número Twilio en E.164 (+1...) o un Messaging Service SID (MG...)
+            'from' => env('TWILIO_FROM'),
+        ],
+    ],
+
+    /*
     | Wompi (Bancolombia) — pasarela de pago única del SaaS.
     | Llaves del panel de comercio: https://comercios.wompi.co
     | - public_key  (pub_test_* / pub_prod_*)   : firma del checkout y tokenización

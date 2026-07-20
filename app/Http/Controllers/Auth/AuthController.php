@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Traits\ApiResponse;
 use App\Models\User;
 use App\Services\Billing\SubscriptionManager;
+use App\Services\Sms\SmsSender;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -28,8 +29,13 @@ class AuthController extends Controller
 
     private const PASSWORD_RESET_TOKEN_TTL_MINUTES = 10;
 
+    private const AUTH_CODE_TTL_SECONDS = 300;
+
+    private const AUTH_CODE_MAX_ATTEMPTS = 5;
+
     /**
-     * Login.
+     * Login — paso 1: valida credenciales y envía un código SMS de 6 dígitos.
+     * El token se emite en verifyLoginCode(); volver a llamar reenvía el código.
      */
     public function login(Request $request): JsonResponse
     {
@@ -60,9 +66,19 @@ class AuthController extends Controller
             }
 
             RateLimiter::clear($throttleKey);
-            $token = $user->createToken('auth_token')->plainTextToken;
 
-            return $this->successResponse(['user' => $user, 'token' => $token], 'Inicio de sesión exitoso');
+            $phone = trim((string) $request->input('phone'));
+            $code = $this->issueAuthCode(
+                $this->loginCodeCacheKey($phone),
+                ['user_id' => $user->id],
+                $phone,
+                $user->country_code
+            );
+
+            return $this->successResponse(
+                $this->authCodeResponseData($phone, $code),
+                'Te enviamos un código de verificación por SMS.'
+            );
         } catch (\Exception $e) {
             Log::error('Login error: '.$e->getMessage());
 
@@ -71,7 +87,43 @@ class AuthController extends Controller
     }
 
     /**
-     * Register.
+     * Login — paso 2: verifica el código SMS y emite el token Sanctum.
+     */
+    public function verifyLoginCode(Request $request): JsonResponse
+    {
+        $validated = Validator::make($request->all(), [
+            'phone' => 'required|string|max:20',
+            'code' => 'required|digits:6',
+        ]);
+
+        if ($validated->fails()) {
+            return $this->validationErrorResponse($validated->errors(), 'Datos inválidos para verificar el código');
+        }
+
+        $phone = trim((string) $request->input('phone'));
+        $key = $this->loginCodeCacheKey($phone);
+
+        $error = $this->checkAuthCode($key, (string) $request->input('code'));
+        if ($error !== null) {
+            return $error;
+        }
+
+        $payload = Cache::pull($key);
+        $user = User::find($payload['user_id'] ?? null);
+
+        if (! $user) {
+            return $this->errorResponse('El código expiró. Vuelve a iniciar sesión.', 422);
+        }
+
+        $token = $user->createToken('auth_token')->plainTextToken;
+
+        return $this->successResponse(['user' => $user, 'token' => $token], 'Inicio de sesión exitoso');
+    }
+
+    /**
+     * Register — paso 1: valida los datos y envía un código SMS de 6 dígitos.
+     * El usuario se crea recién en verifyRegistrationCode(): así ningún número
+     * queda ocupado por registros que nunca confirmaron su teléfono.
      */
     public function register(Request $request): JsonResponse
     {
@@ -87,11 +139,67 @@ class AuthController extends Controller
         }
 
         try {
+            $phone = trim((string) $request->input('phone'));
+
+            // La clave se guarda ya hasheada: el caché nunca ve el PIN en claro.
+            $code = $this->issueAuthCode(
+                $this->registerCodeCacheKey($phone),
+                [
+                    'name' => $request->input('name'),
+                    'phone' => $phone,
+                    'country_code' => $request->input('country_code'),
+                    'password' => Hash::make($request->input('password')),
+                ],
+                $phone,
+                $request->input('country_code')
+            );
+
+            return $this->successResponse(
+                $this->authCodeResponseData($phone, $code),
+                'Te enviamos un código de verificación por SMS.'
+            );
+        } catch (\Exception $e) {
+            Log::error('Register error: '.$e->getMessage());
+
+            return $this->errorResponse($this->safeMessage($e));
+        }
+    }
+
+    /**
+     * Register — paso 2: verifica el código SMS, crea el usuario y emite el token.
+     */
+    public function verifyRegistrationCode(Request $request): JsonResponse
+    {
+        $validated = Validator::make($request->all(), [
+            'phone' => 'required|string|max:20',
+            'code' => 'required|digits:6',
+        ]);
+
+        if ($validated->fails()) {
+            return $this->validationErrorResponse($validated->errors(), 'Datos inválidos para verificar el código');
+        }
+
+        $phone = trim((string) $request->input('phone'));
+        $key = $this->registerCodeCacheKey($phone);
+
+        $error = $this->checkAuthCode($key, (string) $request->input('code'));
+        if ($error !== null) {
+            return $error;
+        }
+
+        $payload = Cache::pull($key);
+
+        // El número pudo registrarse por otra vía mientras el código estaba vivo.
+        if (User::where('phone', $phone)->exists()) {
+            return $this->errorResponse('Ese número de teléfono ya está registrado.', 422);
+        }
+
+        try {
             $user = User::create([
-                'name' => $request->input('name'),
-                'phone' => $request->input('phone'),
-                'country_code' => $request->input('country_code'),
-                'password' => Hash::make($request->input('password')),
+                'name' => $payload['name'],
+                'phone' => $payload['phone'],
+                'country_code' => $payload['country_code'],
+                'password' => $payload['password'],
             ]);
 
             // Prueba gratuita (14 días) para que el usuario use la app desde el
@@ -110,6 +218,85 @@ class AuthController extends Controller
 
             return $this->errorResponse($this->safeMessage($e));
         }
+    }
+
+    /**
+     * Genera el código de 6 dígitos, lo guarda en caché junto al payload y lo
+     * envía por SMS (SmsSender: driver log en local, twilio en producción).
+     * El código NUNCA se escribe en el log.
+     */
+    private function issueAuthCode(string $cacheKey, array $payload, string $phone, ?string $countryCode): string
+    {
+        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+        Cache::put($cacheKey, $payload + [
+            'code' => $code,
+            'attempts' => 0,
+        ], now()->addSeconds(self::AUTH_CODE_TTL_SECONDS));
+
+        app(SmsSender::class)->sendVerificationCode($phone, $countryCode, $code, self::AUTH_CODE_TTL_SECONDS);
+
+        Log::info('Auth verification code generated', [
+            'cache_key' => $cacheKey,
+            'expires_in' => self::AUTH_CODE_TTL_SECONDS,
+        ]);
+
+        return $code;
+    }
+
+    /**
+     * Valida el código contra el caché contando intentos. Devuelve la respuesta
+     * de error o null si el código es correcto (sin consumir la entrada).
+     */
+    private function checkAuthCode(string $cacheKey, string $code): ?JsonResponse
+    {
+        $payload = Cache::get($cacheKey);
+
+        if (! is_array($payload) || ! isset($payload['code'])) {
+            return $this->errorResponse('El código expiró. Solicita uno nuevo.', 422);
+        }
+
+        if (! hash_equals((string) $payload['code'], $code)) {
+            $payload['attempts'] = (int) ($payload['attempts'] ?? 0) + 1;
+
+            if ($payload['attempts'] >= self::AUTH_CODE_MAX_ATTEMPTS) {
+                Cache::forget($cacheKey);
+
+                return $this->errorResponse('Demasiados intentos fallidos. Solicita un código nuevo.', 429);
+            }
+
+            Cache::put($cacheKey, $payload, now()->addSeconds(self::AUTH_CODE_TTL_SECONDS));
+
+            return $this->errorResponse('El código ingresado no es válido.', 422);
+        }
+
+        return null;
+    }
+
+    private function authCodeResponseData(string $phone, string $code): array
+    {
+        $data = [
+            'verification_required' => true,
+            'phone' => $phone,
+            'phone_mask' => substr($phone, 0, 3).'•••'.substr($phone, -2),
+            'expires_in' => self::AUTH_CODE_TTL_SECONDS,
+        ];
+
+        if (! app()->isProduction()) {
+            $data['debug_code'] = $code;
+        }
+
+        return $data;
+    }
+
+    private function loginCodeCacheKey(string $phone): string
+    {
+        return 'login_2fa:'.Str::lower($phone);
+    }
+
+    private function registerCodeCacheKey(string $phone): string
+    {
+        return 'register_2fa:'.Str::lower($phone);
     }
 
     /**
@@ -140,9 +327,22 @@ class AuthController extends Controller
             'expires_at' => now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS)->toIso8601String(),
         ], now()->addSeconds(self::PASSWORD_RESET_CODE_TTL_SECONDS));
 
-        // TODO: Reemplazar este log por el envío real mediante un proveedor SMS.
+        // Envío real por SMS (driver log en local, twilio en producción).
         // El código NUNCA se escribe en el log: los logs suelen terminar en
         // agregadores externos y un código de recuperación es una credencial.
+        try {
+            app(SmsSender::class)->sendVerificationCode(
+                $phone,
+                $user->country_code,
+                $code,
+                self::PASSWORD_RESET_CODE_TTL_SECONDS
+            );
+        } catch (\Throwable $e) {
+            Log::error('No se pudo enviar el SMS de recuperación', ['user_id' => $user->id, 'error' => $e->getMessage()]);
+
+            return $this->errorResponse('No pudimos enviar el código por SMS. Intenta de nuevo en unos minutos.', 500);
+        }
+
         Log::info('Password recovery code generated', [
             'user_id' => $user->id,
             'phone' => $phone,

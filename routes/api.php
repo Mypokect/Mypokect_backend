@@ -30,11 +30,18 @@ Route::get('/error', function () {
 })->name('login');
 
 // --- AUTENTICACIÓN ---
+// Login y registro son en dos pasos: credenciales → código SMS → token.
 Route::post('/login', [AuthController::class, 'login'])
     ->middleware('throttle:10,1');
 
+Route::post('/login/verify-code', [AuthController::class, 'verifyLoginCode'])
+    ->middleware('throttle:12,1');
+
 Route::post('/register', [AuthController::class, 'register'])
     ->middleware('throttle:10,1');
+
+Route::post('/register/verify-code', [AuthController::class, 'verifyRegistrationCode'])
+    ->middleware('throttle:12,1');
 
 Route::post('/password-recovery/request-code', [AuthController::class, 'requestPasswordResetCode'])
     ->middleware('throttle:6,1');
