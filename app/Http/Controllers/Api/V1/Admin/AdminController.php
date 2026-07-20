@@ -200,14 +200,24 @@ class AdminController extends Controller
     }
 
     /**
-     * Analítica de uso: tráfico por sección (page_views de la web), visitas
-     * por día y actividad real por función (filas creadas en cada dominio).
-     * Con esto se ve qué partes usa la gente y cuáles no.
+     * Analítica de uso: tráfico por sección (page_views de web Y app móvil),
+     * visitas por día y actividad real por función (filas creadas en cada
+     * dominio, sin importar desde qué plataforma se crearon). Con esto se ve
+     * comportamiento completo: qué usa la gente, y desde dónde.
      */
     public function analytics(): JsonResponse
     {
         $since30 = now()->subDays(30);
         $since14 = now()->subDays(14);
+
+        // Eventos previos al tracking móvil no traen `platform`: se asumen
+        // web (era la única fuente que existía).
+        // CAST a UNSIGNED: SUM(CASE...) es DECIMAL en MySQL y PDO lo entrega
+        // como string (rompería la suma en el frontend); COUNT() sí es BIGINT
+        // nativo. Se fuerza el mismo tipo entero para las dos columnas.
+        $platformExpr = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(properties, '$.platform')), 'web')";
+        $webCount = DB::raw("CAST(SUM(CASE WHEN {$platformExpr} = 'web' THEN 1 ELSE 0 END) AS UNSIGNED) as web_visits");
+        $mobileCount = DB::raw("CAST(SUM(CASE WHEN {$platformExpr} = 'mobile' THEN 1 ELSE 0 END) AS UNSIGNED) as mobile_visits");
 
         $sections = AnalyticsEvent::where('event', 'page_view')
             ->where('occurred_at', '>', $since30)
@@ -215,6 +225,8 @@ class AdminController extends Controller
                 DB::raw("JSON_UNQUOTE(JSON_EXTRACT(properties, '$.section')) as section"),
                 DB::raw('COUNT(*) as visits'),
                 DB::raw('COUNT(DISTINCT user_id) as unique_users'),
+                $webCount,
+                $mobileCount,
             )
             ->groupBy('section')
             ->orderByDesc('visits')
@@ -226,12 +238,15 @@ class AdminController extends Controller
                 DB::raw('DATE(occurred_at) as day'),
                 DB::raw('COUNT(*) as visits'),
                 DB::raw('COUNT(DISTINCT user_id) as unique_users'),
+                $webCount,
+                $mobileCount,
             )
             ->groupBy('day')
             ->orderBy('day')
             ->get();
 
-        // Actividad real por función: cuántas filas creó la gente en 30 días.
+        // Actividad real por función: cuántas filas creó la gente en 30 días
+        // (agrega ambas plataformas: la tabla no distingue el origen).
         $activity = collect([
             'movements'   => 'movements',
             'budgets'     => 'budgets',
@@ -241,12 +256,21 @@ class AdminController extends Controller
             'scheduled'   => 'scheduled_transactions',
         ])->map(fn (string $table) => DB::table($table)->where('created_at', '>', $since30)->count());
 
+        $platformActive = function (\Carbon\Carbon $since) use ($platformExpr) {
+            return AnalyticsEvent::where('occurred_at', '>', $since)
+                ->select(DB::raw("{$platformExpr} as platform"), DB::raw('COUNT(DISTINCT user_id) as users'))
+                ->groupBy('platform')
+                ->pluck('users', 'platform');
+        };
+
         return response()->json(['data' => [
-            'active_users_7d'  => AnalyticsEvent::where('occurred_at', '>', now()->subDays(7))->distinct()->count('user_id'),
-            'active_users_30d' => AnalyticsEvent::where('occurred_at', '>', $since30)->distinct()->count('user_id'),
-            'sections_30d'     => $sections,
-            'daily_14d'        => $daily,
-            'feature_activity_30d' => $activity,
+            'active_users_7d'       => AnalyticsEvent::where('occurred_at', '>', now()->subDays(7))->distinct()->count('user_id'),
+            'active_users_30d'      => AnalyticsEvent::where('occurred_at', '>', $since30)->distinct()->count('user_id'),
+            'active_users_7d_by_platform'  => $platformActive(now()->subDays(7)),
+            'active_users_30d_by_platform' => $platformActive($since30),
+            'sections_30d'          => $sections,
+            'daily_14d'             => $daily,
+            'feature_activity_30d'  => $activity,
         ]]);
     }
 

@@ -54,14 +54,21 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
     Route::get('/payment-method', [PaymentController::class, 'paymentMethod']);
     Route::delete('/payment-method', [PaymentController::class, 'destroyPaymentMethod']);
 
-    // Analítica de producto: la web reporta cada visita de sección
-    // (page_view). El panel admin agrega estos eventos para ver el tráfico.
+    // Analítica de producto: la web Y la app móvil reportan cada visita de
+    // sección (page_view). El panel admin agrega estos eventos por
+    // plataforma para ver el tráfico y comportamiento completo.
     Route::post('/analytics/track', function (\Illuminate\Http\Request $request) {
-        $validated = $request->validate(['section' => ['required', 'string', 'max:40']]);
+        $validated = $request->validate([
+            'section'  => ['required', 'string', 'max:40'],
+            'platform' => ['sometimes', 'in:web,mobile'],
+        ]);
         \App\Models\AnalyticsEvent::create([
             'user_id'     => $request->user()->id,
             'event'       => 'page_view',
-            'properties'  => ['section' => $validated['section']],
+            'properties'  => [
+                'section'  => $validated['section'],
+                'platform' => $validated['platform'] ?? 'web',
+            ],
             'occurred_at' => now(),
         ]);
 
