@@ -90,9 +90,13 @@ Route::middleware(['auth:sanctum', 'throttle:200,1'])->group(function () {
         Route::get('/analytics', [AdminController::class, 'analytics']);
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{user}/premium', [AdminController::class, 'setPremium']);
+        Route::get('/users/{user}/usage', [AdminController::class, 'userUsage']);
         Route::get('/payments', [AdminController::class, 'payments']);
         Route::get('/plans', [AdminController::class, 'plans']);
         Route::put('/plans/{plan}', [AdminController::class, 'updatePlan']);
+        Route::get('/events', [AdminController::class, 'events']);
+        Route::put('/events/{reminder}', [AdminController::class, 'updateEvent']);
+        Route::delete('/events/{reminder}', [AdminController::class, 'destroyEvent']);
         Route::get('/announcements', [AdminController::class, 'announcements']);
         Route::post('/announcements', [AdminController::class, 'storeAnnouncement']);
         Route::put('/announcements/{announcement}', [AdminController::class, 'updateAnnouncement']);

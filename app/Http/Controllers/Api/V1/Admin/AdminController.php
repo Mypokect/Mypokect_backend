@@ -7,6 +7,7 @@ use App\Models\AnalyticsEvent;
 use App\Models\Announcement;
 use App\Models\BillingPayment;
 use App\Models\Plan;
+use App\Models\Reminder;
 use App\Models\Subscription;
 use App\Models\User;
 use App\Models\WebhookLog;
@@ -136,6 +137,53 @@ class AdminController extends Controller
         }
 
         return response()->json(['data' => ['is_premium' => true, 'ends_at' => $end]]);
+    }
+
+    /**
+     * Estadísticas de uso de un usuario puntual: cuánto usa cada función y
+     * su actividad reciente (page_views, plataforma). Se pide bajo demanda
+     * (no en el listado) porque agrega varias tablas.
+     */
+    public function userUsage(User $user): JsonResponse
+    {
+        $since30 = now()->subDays(30);
+        $platformExpr = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(properties, '$.platform')), 'web')";
+
+        $events = AnalyticsEvent::where('user_id', $user->id);
+
+        $lastActivity = (clone $events)->max('occurred_at');
+
+        $platform30d = (clone $events)->where('event', 'page_view')
+            ->where('occurred_at', '>', $since30)
+            ->select(DB::raw("{$platformExpr} as platform"), DB::raw('COUNT(*) as visits'))
+            ->groupBy('platform')
+            ->pluck('visits', 'platform');
+
+        $topSections = (clone $events)->where('event', 'page_view')
+            ->where('occurred_at', '>', $since30)
+            ->select(
+                DB::raw("JSON_UNQUOTE(JSON_EXTRACT(properties, '$.section')) as section"),
+                DB::raw('COUNT(*) as visits'),
+            )
+            ->groupBy('section')
+            ->orderByDesc('visits')
+            ->limit(5)
+            ->get();
+
+        return response()->json(['data' => [
+            'counts' => [
+                'movements'   => $user->movements()->count(),
+                'budgets'     => DB::table('budgets')->where('user_id', $user->id)->count(),
+                'goals'       => $user->savingGoals()->count(),
+                'reminders'   => Reminder::where('user_id', $user->id)->count(),
+                'scheduled'   => $user->scheduledTransactions()->count(),
+            ],
+            'page_views_7d'  => (clone $events)->where('event', 'page_view')->where('occurred_at', '>', now()->subDays(7))->count(),
+            'page_views_30d' => (clone $events)->where('event', 'page_view')->where('occurred_at', '>', $since30)->count(),
+            'last_activity_at' => $lastActivity,
+            'platform_30d'   => $platform30d,
+            'top_sections_30d' => $topSections,
+        ]]);
     }
 
     /** Historial de pagos de toda la plataforma. */
@@ -272,6 +320,66 @@ class AdminController extends Controller
             'daily_14d'             => $daily,
             'feature_activity_30d'  => $activity,
         ]]);
+    }
+
+    // ── Eventos (recordatorios de calendario de los usuarios) ───────────
+
+    /** Recordatorios de toda la plataforma. Filtro por usuario/título/estado/tipo. */
+    public function events(Request $request): JsonResponse
+    {
+        $events = Reminder::query()
+            ->with('user:id,name,phone')
+            ->when($request->filled('search'), function ($q) use ($request) {
+                $s = '%'.$request->string('search').'%';
+                $q->where(fn ($w) => $w->where('title', 'like', $s)
+                    ->orWhere('category', 'like', $s)
+                    ->orWhereHas('user', fn ($u) => $u->where('name', 'like', $s)->orWhere('phone', 'like', $s)));
+            })
+            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->string('status')))
+            ->when($request->filled('type'), fn ($q) => $q->where('type', $request->string('type')))
+            ->latest('due_date')
+            ->paginate(20);
+
+        $events->getCollection()->transform(fn (Reminder $r) => [
+            'id'         => $r->id,
+            'title'      => $r->title,
+            'type'       => $r->type,
+            'amount'     => $r->amount,
+            'category'   => $r->category,
+            'note'       => $r->note,
+            'due_date'   => $r->due_date,
+            'recurrence' => $r->recurrence,
+            'status'     => $r->status,
+            'created_at' => $r->created_at,
+            'user'       => $r->user ? ['id' => $r->user->id, 'name' => $r->user->name, 'phone' => $r->user->phone] : null,
+        ]);
+
+        return response()->json($events);
+    }
+
+    /** Edición administrativa de un recordatorio (soporte/corrección). */
+    public function updateEvent(Request $request, Reminder $reminder): JsonResponse
+    {
+        $validated = $request->validate([
+            'title'    => ['sometimes', 'string', 'max:120'],
+            'amount'   => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'category' => ['sometimes', 'nullable', 'string', 'max:60'],
+            'note'     => ['sometimes', 'nullable', 'string'],
+            'due_date' => ['sometimes', 'date'],
+            'status'   => ['sometimes', 'in:pending,paid'],
+        ]);
+
+        $reminder->update($validated);
+
+        return response()->json(['data' => $reminder->fresh('user:id,name,phone')]);
+    }
+
+    /** Elimina (soft delete) un recordatorio. */
+    public function destroyEvent(Reminder $reminder): JsonResponse
+    {
+        $reminder->delete();
+
+        return response()->json(['data' => ['deleted' => true]]);
     }
 
     // ── Novedades / actualizaciones ─────────────────────────────────────
